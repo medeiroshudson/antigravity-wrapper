@@ -60,6 +60,13 @@ function positiveInt(raw: string | undefined, fallback: number): number {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+/** Like `positiveInt`, but 0 is a meaningful value (it disables the wait). */
+function nonNegativeInt(raw: string | undefined, fallback: number): number {
+  if (typeof raw !== "string") return fallback;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
 export function getDbPath(env: NodeJS.ProcessEnv = process.env): string {
   const value = env.DB_PATH?.trim();
   return value && value.length > 0 ? value : "./data/antigravity.db";
@@ -92,6 +99,15 @@ export function getModelsTtlMs(env: NodeJS.ProcessEnv = process.env): number {
 }
 export function getCooldownTransientMs(env: NodeJS.ProcessEnv = process.env): number {
   return positiveInt(env.COOLDOWN_TRANSIENT_MS, 60_000);
+}
+
+/**
+ * Wait before retrying the same account after a transient throttle. Kept short:
+ * the account is healthy and its quota intact, so the retry is cheap and the
+ * alternative — switching accounts or waiting out a cooldown — costs far more.
+ */
+export function getTransientRetryBackoffMs(env: NodeJS.ProcessEnv = process.env): number {
+  return nonNegativeInt(env.TRANSIENT_RETRY_BACKOFF_MS, 1_000);
 }
 export function getMaxFailoverAttempts(env: NodeJS.ProcessEnv = process.env): number {
   return positiveInt(env.MAX_FAILOVER_ATTEMPTS, 3);

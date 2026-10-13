@@ -1,4 +1,4 @@
-import { getMaxFailoverAttempts } from "../../config/index.js";
+import { getMaxFailoverAttempts, getTransientRetryBackoffMs } from "../../config/index.js";
 import { getMaxOutputTokens, getThinkingConfig, type ReasoningEffort } from "../../config/models.js";
 import { t } from "../../i18n/index.js";
 import type { AccountService } from "../accounts/service.js";
@@ -49,6 +49,11 @@ export interface TurnDeps {
  */
 const fatalAfterContent = new WeakSet<object>();
 
+/** Extra tries on the same account after a transient throttle, before switching. */
+const TRANSIENT_RETRIES = 1;
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
 /**
  * Maps the backend `finishReason` to the OpenAI vocabulary.
  * `SAFETY`/`RECITATION` are content blocks, not truncations: reporting them as
@@ -75,6 +80,7 @@ export class TurnRunner {
   ): Promise<TurnOutcome> {
     const candidates = await this.deps.accounts.orderFor(input.runtimeModel);
     const limit = getMaxFailoverAttempts(this.deps.env);
+    const backoffMs = getTransientRetryBackoffMs(this.deps.env);
     const failures: Array<{ accountId: string; kind: string; message: string }> = [];
     const tried = new Set<string>();
 
@@ -82,17 +88,30 @@ export class TurnRunner {
       if (tried.has(candidate.id)) continue;
       tried.add(candidate.id);
 
-      try {
-        const fresh = await this.deps.accounts.ensureFresh(candidate);
-        if (!fresh.projectId) throw new UpstreamError("server_error", 0, t("chat.accountWithoutProjectId"));
-        this.deps.accounts.markUsed(candidate.id);
-        const result = await this.runOnce(input, fresh.accessToken ?? "", fresh.projectId, opts);
-        return { result, accountId: candidate.id };
-      } catch (error) {
-        if (error instanceof UpstreamError) {
+      // A transient throttle earns the account one more try before the request
+      // moves on: the account is healthy and its quota intact, so switching away
+      // would spend the next account on a problem the first one does not have.
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          const fresh = await this.deps.accounts.ensureFresh(candidate);
+          if (!fresh.projectId) {
+            throw new UpstreamError("server_error", 0, t("chat.accountWithoutProjectId"));
+          }
+          this.deps.accounts.markUsed(candidate.id);
+          const result = await this.runOnce(input, fresh.accessToken ?? "", fresh.projectId, opts);
+          return { result, accountId: candidate.id };
+        } catch (error) {
+          if (!(error instanceof UpstreamError)) throw error;
+
           // A client error is not fixed by switching accounts, and an error that
           // arrived after the first content can no longer switch accounts: propagate.
           if (error.kind === "client_error" || fatalAfterContent.has(error)) throw error;
+
+          if (error.kind === "transient_rate_limit" && attempt < TRANSIENT_RETRIES) {
+            if (backoffMs > 0) await sleep(backoffMs);
+            continue;
+          }
+
           this.deps.accounts.applyFailure(candidate.id, error);
           // After a 429 that account's snapshot is stale: refresh the quota
           // best-effort (spec §9.3). Without blocking failover.
@@ -100,9 +119,8 @@ export class TurnRunner {
             void this.deps.accounts.refreshQuota(candidate.id).catch(() => undefined);
           }
           failures.push({ accountId: candidate.id, kind: error.kind, message: error.message });
-          continue;
+          break;
         }
-        throw error;
       }
     }
 
@@ -170,16 +188,33 @@ export class TurnRunner {
         }
       }
 
-      if (!sawFinish) {
+      // A response the backend's filters blocked arrives as content followed by a
+      // clean end of body with no finishReason (measured). Content plus a clean end
+      // is therefore the answer, not a broken stream; only a stream that produced
+      // nothing at all is a failure. The cost of the trade-off is that a body
+      // truncated exactly at a chunk boundary reads as complete — which still hands
+      // the caller the text that arrived, instead of a 503 that discards it.
+      if (!sawFinish && content.length === 0 && toolParts.length === 0) {
         throw new UpstreamError("server_error", 0, t("chat.streamWithoutFinishReason"));
       }
     } catch (error) {
+      // A dropped connection or a stall surfaces as a plain Error from the reader.
+      // Classify it here so the runner can act on it: in `stream:false` nothing has
+      // reached the client yet, so there is still an account to fail over to.
+      const failure =
+        error instanceof UpstreamError
+          ? error
+          : new UpstreamError(
+              "server_error",
+              0,
+              error instanceof Error ? error.message : String(error),
+            );
       // Fatal after the first content only when there is a stream consumer:
       // in `stream:false` nothing reached the client until the final JSON, so a
       // recoverable error mid-generation can still fall through to the next
       // account (spec §6.3).
-      if (opts.onDelta && content.length > 0) fatalAfterContent.add(error as object);
-      throw error;
+      if (opts.onDelta && content.length > 0) fatalAfterContent.add(failure);
+      throw failure;
     }
 
     // `normalizeToolCalls` returns the nested OpenAI shape (function.{name,arguments});

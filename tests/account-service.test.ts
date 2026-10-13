@@ -69,13 +69,17 @@ describe("applyFailure", () => {
     expect(account?.cooldownUntil).toBeGreaterThan(Date.now() + 3_600_000);
   });
 
-  it("uses the short cooldown when the 429 carries no resetTime", () => {
+  it("leaves the state unchanged on a transient 429 (spec §11)", () => {
     seed();
-    const service = new AccountService({ store, env: { ...ENV, COOLDOWN_TRANSIENT_MS: "5000" } });
+    const service = new AccountService({ store, env: ENV });
     service.applyFailure("a1", new UpstreamError("transient_rate_limit", 429, "rl"));
-    const until = store.getAccount("a1")?.cooldownUntil ?? 0;
-    expect(until - Date.now()).toBeLessThanOrEqual(5_000);
-    expect(until).toBeGreaterThan(Date.now());
+    const account = store.getAccount("a1");
+    // The spec's error table says a transient throttle changes nothing in the pool.
+    // Cooling the account down instead took it out of rotation for the whole
+    // cooldown window, so every later request answered 503 while the quota was
+    // still almost untouched.
+    expect(account?.status).toBe("active");
+    expect(account?.cooldownUntil).toBeNull();
   });
 
   it("marks it invalid on VALIDATION_REQUIRED, storing the reason", () => {

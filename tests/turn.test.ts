@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { ENDPOINTS } from "../src/config/index.js";
 import { AllAccountsFailedError, TurnRunner } from "../src/lib/chat/turn.js";
 import type { AccountService } from "../src/lib/accounts/service.js";
 import type { AccountSnapshot } from "../src/lib/accounts/store.js";
@@ -38,6 +39,30 @@ const TEXT_SSE = [
   'data: {"response":{"candidates":[{"content":{"parts":[]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":1,"totalTokenCount":6}}}\n\n',
   "data: [DONE]\n\n",
 ];
+
+/**
+ * A stream that delivers one chunk and then fails mid-body, the way a dropped
+ * connection does. Distinct from a clean end without a finishReason, which is how
+ * the backend closes a response its filters blocked.
+ */
+function truncatedSse(text: string): Response {
+  let sent = false;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (!sent) {
+        sent = true;
+        controller.enqueue(
+          new TextEncoder().encode(
+            `data: {"response":{"candidates":[{"content":{"parts":[{"text":"${text}"}]}}]}}\n\n`,
+          ),
+        );
+        return;
+      }
+      controller.error(new Error("connection reset"));
+    },
+  });
+  return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+}
 
 function service(accounts: AccountSnapshot[]): AccountService {
   return {
@@ -159,12 +184,36 @@ describe("TurnRunner", () => {
     expect(result.toolCalls[0]?.thoughtSignature).toBe("SIG");
   });
 
-  it("fails when the stream ends without finishReason", async () => {
-    // Without `onDelta` (stream:false) a truncated stream is recoverable and falls
-    // through to the next account; with a single account the result is
-    // AllAccountsFailedError, but the reason's classification is still server_error.
+  it("treats a clean stream end with content as a complete response", async () => {
+    // Measured backend behaviour: a prompt its filters block streams the refusal as
+    // content and then closes WITHOUT a finishReason. Reading that as a broken
+    // stream turned every blocked prompt into a 503 and discarded the refusal text.
+    const refusal = "This request was blocked by Gemini's filters.";
     const fetchImpl = vi.fn(async () =>
-      sse(['data: {"response":{"candidates":[{"content":{"parts":[{"text":"parcial"}]}}]}}\n\n']),
+      sse([`data: {"response":{"candidates":[{"content":{"parts":[{"text":"${refusal}"}]}}]}}\n\n`]),
+    ) as unknown as typeof fetch;
+    const runner = new TurnRunner({ accounts: service([snapshot("a1")]), fetchImpl });
+    const { result } = await runner.run(BASE);
+    expect(result.content).toBe(refusal);
+    expect(result.finishReason).toBe("stop");
+  });
+
+  it("treats a stream that carried tool calls and no finishReason as complete", async () => {
+    const fetchImpl = vi.fn(async () =>
+      sse([
+        'data: {"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"f","args":{"a":1}},"thoughtSignature":"SIG"}]}}]}}\n\n',
+      ]),
+    ) as unknown as typeof fetch;
+    const runner = new TurnRunner({ accounts: service([snapshot("a1")]), fetchImpl });
+    const { result } = await runner.run(BASE);
+    expect(result.finishReason).toBe("tool_calls");
+    expect(result.toolCalls).toHaveLength(1);
+  });
+
+  it("still fails when the stream ends with no content and no finishReason", async () => {
+    // Nothing arrived at all: that is a genuinely empty stream, not a response.
+    const fetchImpl = vi.fn(async () =>
+      sse(['data: {"response":{"candidates":[{"content":{"parts":[]}}]}}\n\n']),
     ) as unknown as typeof fetch;
     const runner = new TurnRunner({ accounts: service([snapshot("a1")]), fetchImpl });
     const error = await runner.run(BASE).catch((e: unknown) => e);
@@ -172,14 +221,39 @@ describe("TurnRunner", () => {
     expect((error as AllAccountsFailedError).failures[0]?.kind).toBe("server_error");
   });
 
-  it("with stream:false, an error mid-generation fails over to the next account", async () => {
-    // The first account emits text and dies without finishReason (recoverable error);
+  it("retries the same account once after a transient 429, without cooling it down", async () => {
+    // `streamGenerate` walks every candidate endpoint before giving up on an attempt,
+    // so the fake has to throttle all of them before the account-level retry matters.
+    const endpoints = ENDPOINTS.length;
+    let calls = 0;
+    const fetchImpl = vi.fn(async () => {
+      calls += 1;
+      return calls <= endpoints
+        ? new Response('{"error":{"message":"Resource has been exhausted (e.g. check quota)."}}', {
+            status: 429,
+          })
+        : sse(TEXT_SSE);
+    }) as unknown as typeof fetch;
+    const accounts = service([snapshot("a1")]);
+    const runner = new TurnRunner({
+      accounts,
+      fetchImpl,
+      env: { TRANSIENT_RETRY_BACKOFF_MS: "0" },
+    });
+    const { accountId, result } = await runner.run(BASE);
+    expect(accountId).toBe("a1");
+    expect(calls).toBe(endpoints + 1);
+    expect(result.content).toBe("ola");
+    // The throttle must not change the account's state (spec §11).
+    expect(accounts.applyFailure).not.toHaveBeenCalled();
+  });
+
+  it("with stream:false, a truncated stream fails over to the next account", async () => {
+    // The first account emits text and the connection drops (a recoverable error);
     // since nothing reached the client until the final JSON, the second account is tried.
     const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
       const auth = String((init?.headers as Record<string, string> | undefined)?.Authorization ?? "");
-      return auth.includes("tok-a1")
-        ? sse(['data: {"response":{"candidates":[{"content":{"parts":[{"text":"parcial"}]}}]}}\n\n'])
-        : sse(TEXT_SSE);
+      return auth.includes("tok-a1") ? truncatedSse("parcial") : sse(TEXT_SSE);
     }) as unknown as typeof fetch;
     const accounts = service([snapshot("a1"), snapshot("a2")]);
     const runner = new TurnRunner({ accounts, fetchImpl });
@@ -189,15 +263,13 @@ describe("TurnRunner", () => {
   });
 
   it("in stream mode, after a delta is emitted, does not switch accounts (fatal after content)", async () => {
-    const fetchImpl = vi.fn(async () =>
-      sse(['data: {"response":{"candidates":[{"content":{"parts":[{"text":"parcial"}]}}]}}\n\n']),
-    ) as unknown as typeof fetch;
+    const fetchImpl = vi.fn(async () => truncatedSse("parcial")) as unknown as typeof fetch;
     const accounts = service([snapshot("a1"), snapshot("a2")]);
     const runner = new TurnRunner({ accounts, fetchImpl });
     const deltas: string[] = [];
-    await expect(runner.run(BASE, { onDelta: (t) => deltas.push(t) })).rejects.toMatchObject({
-      kind: "server_error",
-    });
+    await expect(runner.run(BASE, { onDelta: (t) => deltas.push(t) })).rejects.toThrow(
+      "connection reset",
+    );
     // The second account was never tried: the delta was already on the wire.
     expect(accounts.applyFailure).not.toHaveBeenCalled();
   });
