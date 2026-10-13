@@ -8,6 +8,7 @@ import {
   exchangeCode,
   generatePkce,
   getUserEmail,
+  loadCodeAssistInfo,
   refreshAccessToken,
 } from "../src/lib/antigravity/oauth.js";
 
@@ -79,8 +80,74 @@ describe("refreshAccessToken", () => {
   });
 });
 
+describe("loadCodeAssistInfo", () => {
+  function respond(body: unknown, status = 200) {
+    return vi.fn(async () => new Response(JSON.stringify(body), { status })) as unknown as typeof fetch;
+  }
+
+  it("returns the projectId and both halves of the tier", async () => {
+    const fetchImpl = respond({
+      cloudaicompanionProject: "aicode-consumers",
+      currentTier: { id: "free-tier", name: "Antigravity" },
+      paidTier: { id: "g1-pro-tier", name: "Google AI Pro" },
+    });
+
+    const info = await loadCodeAssistInfo("at", { env: ENV, fetchImpl });
+
+    expect(info?.projectId).toBe("aicode-consumers");
+    expect(info?.paidTierId).toBe("g1-pro-tier");
+    expect(info?.paidTierName).toBe("Google AI Pro");
+  });
+
+  it("returns the free tier as a tier, not as nothing", async () => {
+    const fetchImpl = respond({
+      cloudaicompanionProject: "aicode-consumers",
+      // The measured free-tier payload (spec §3.6). currentTier is also "free-tier"
+      // in both accounts, so it carries no signal — the paidTier id is what counts.
+      currentTier: { id: "free-tier", name: "Antigravity" },
+      paidTier: { id: "free-tier", name: "Antigravity Starter Quota" },
+    });
+
+    const info = await loadCodeAssistInfo("at", { env: ENV, fetchImpl });
+
+    expect(info?.paidTierId).toBe("free-tier");
+    expect(info?.paidTierName).toBe("Antigravity Starter Quota");
+  });
+
+  it("yields nulls for the missing fields instead of throwing", async () => {
+    const fetchImpl = respond({ cloudaicompanionProject: "p" });
+    const info = await loadCodeAssistInfo("at", { env: ENV, fetchImpl });
+
+    // The refresh path must never fail because the tier is absent: no tier is a fact
+    // to record, not an error to raise.
+    expect(info?.projectId).toBe("p");
+    expect(info?.paidTierId).toBeNull();
+    expect(info?.paidTierName).toBeNull();
+  });
+
+  it("does not throw when no endpoint answers", async () => {
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 500 })) as unknown as typeof fetch;
+    expect(await loadCodeAssistInfo("at", { env: ENV, fetchImpl })).toBeNull();
+  });
+
+  it("does not throw on a transport failure", async () => {
+    const fetchImpl = vi.fn(async () => {
+      throw new Error("ECONNREFUSED");
+    }) as unknown as typeof fetch;
+    expect(await loadCodeAssistInfo("at", { env: ENV, fetchImpl })).toBeNull();
+  });
+
+  it("carries the CLI fingerprint", async () => {
+    const fetchImpl = respond({ cloudaicompanionProject: "p" });
+    await loadCodeAssistInfo("at", { env: ENV, fetchImpl });
+
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect((init.headers as Record<string, string>)["User-Agent"]).toContain("antigravity/cli/");
+  });
+});
+
 describe("discoverProjectId", () => {
-  it("extracts cloudaicompanionProject and the paidTier", async () => {
+  it("extracts the projectId and the tier, still returning the name", async () => {
     const fetchImpl = vi.fn(
       async () =>
         new Response(
@@ -94,6 +161,17 @@ describe("discoverProjectId", () => {
     const out = await discoverProjectId("at", { env: ENV, fetchImpl });
     expect(out.projectId).toBe("aicode-consumers");
     expect(out.paidTier).toBe("Google AI Pro");
+    // New: the id is no longer discarded (spec D15).
+    expect(out.paidTierId).toBe("g1-pro-tier");
+  });
+
+  it("still throws when no projectId can be found", async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response(JSON.stringify({ paidTier: { id: "free-tier" } })),
+    ) as unknown as typeof fetch;
+    // The login path's contract is unchanged: a login without a project is a failed
+    // login, even though the tier reader tolerates the same payload.
+    await expect(discoverProjectId("at", { env: ENV, fetchImpl })).rejects.toThrow();
   });
 });
 
