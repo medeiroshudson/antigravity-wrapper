@@ -80,6 +80,39 @@ describe("AccountStore", () => {
     expect(store.getAccount("a1")?.cooldownUntil).toBeNull();
   });
 
+  it("reports an expired cooldown as active, keeping the reason it recorded", () => {
+    add();
+    store.setStatus("a1", "cooldown", {
+      cooldownUntil: Date.now() - 1_000,
+      lastError: "quota wall",
+    });
+
+    // The selector has always treated an expired cooldown as eligible, so the label
+    // said "cooldown" while requests were being served — misleading on the admin view.
+    expect(store.getAccount("a1")?.status).toBe("active");
+    expect(store.getAccount("a1")?.cooldownUntil).toBeNull();
+    // The reason stays: it explains why the account was parked in the first place.
+    expect(store.getAccount("a1")?.lastError).toBe("quota wall");
+    expect(store.listAccounts()[0]?.status).toBe("active");
+  });
+
+  it("keeps reporting an unexpired cooldown as cooldown", () => {
+    add();
+    store.setStatus("a1", "cooldown", { cooldownUntil: Date.now() + 60_000 });
+
+    expect(store.getAccount("a1")?.status).toBe("cooldown");
+    expect(store.listAccounts()[0]?.status).toBe("cooldown");
+  });
+
+  it("reports a cooldown with no expiry as active, matching the selector", () => {
+    add();
+    store.setStatus("a1", "cooldown");
+
+    // The selector treats "cooldown without an expiry" as already over, so the label
+    // must agree with it rather than contradicting it.
+    expect(store.getAccount("a1")?.status).toBe("active");
+  });
+
   it("removes the account and its quotas", () => {
     add();
     store.saveQuota([

@@ -139,12 +139,32 @@ export class AccountStore {
     return account;
   }
 
+  /**
+   * Retires cooldowns whose time has passed, so the reported status matches what the
+   * selector actually does with them (spec §9.1: `cooldown --expira--> active`). The
+   * selector has always admitted these accounts, so without this the admin view reads
+   * "cooldown" while requests are being served.
+   *
+   * The recorded `last_error` is kept: it is why the account was parked, and it stays
+   * useful after the account is back in rotation.
+   */
+  private expireCooldowns(now: number = Date.now()): void {
+    this.db
+      .prepare(
+        `UPDATE accounts SET status = 'active', cooldown_until = NULL
+         WHERE status = 'cooldown' AND (cooldown_until IS NULL OR cooldown_until <= ?)`,
+      )
+      .run(now);
+  }
+
   getAccount(id: string): Account | undefined {
+    this.expireCooldowns();
     const row = this.db.prepare("SELECT * FROM accounts WHERE id = ?").get(id) as Row | undefined;
     return row ? toAccount(row) : undefined;
   }
 
   listAccounts(): Account[] {
+    this.expireCooldowns();
     const rows = this.db
       .prepare("SELECT * FROM accounts ORDER BY priority DESC, created_at ASC")
       .all() as unknown as Row[];
