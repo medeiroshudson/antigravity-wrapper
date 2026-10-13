@@ -15,24 +15,37 @@ export interface Account {
   status: AccountStatus;
   cooldownUntil: number | null;
   lastError: string | null;
+  quotaSummaryError: string | null;
+  paidTierId: string | null;
+  paidTierName: string | null;
   enabled: boolean;
   priority: number;
   createdAt: number;
   lastUsedAt: number | null;
 }
 
-export interface QuotaSnapshot {
+/**
+ * One bucket of one group, as the summary RPC reports it (spec §3.1). The names and
+ * descriptions are stored exactly as the backend sends them and never reconstructed
+ * on read: if the backend renames a label the display follows without a release.
+ */
+export interface QuotaBucket {
   accountId: string;
-  modelId: string;
+  bucketId: string;
   window: string;
+  displayName: string | null;
+  groupName: string | null;
+  groupDescription: string | null;
+  bucketDescription: string | null;
   remainingFraction: number;
   resetAt: number | null;
   fetchedAt: number;
 }
 
-export type AccountSnapshot = Account & { quota: QuotaSnapshot[] };
+export type AccountSnapshot = Account & { quota: QuotaBucket[] };
 
 const PENDING_OAUTH_TTL_MS = 5 * 60 * 1000;
+const SCHEMA_VERSION = 1;
 
 interface Row {
   id: string;
@@ -44,6 +57,9 @@ interface Row {
   status: string;
   cooldown_until: number | null;
   last_error: string | null;
+  quota_summary_error: string | null;
+  paid_tier_id: string | null;
+  paid_tier_name: string | null;
   enabled: number;
   priority: number;
   created_at: number;
@@ -61,6 +77,9 @@ function toAccount(row: Row): Account {
     status: row.status as AccountStatus,
     cooldownUntil: row.cooldown_until,
     lastError: row.last_error,
+    quotaSummaryError: row.quota_summary_error,
+    paidTierId: row.paid_tier_id,
+    paidTierName: row.paid_tier_name,
     enabled: row.enabled === 1,
     priority: row.priority,
     createdAt: row.created_at,
@@ -83,21 +102,72 @@ export class AccountStore {
         id TEXT PRIMARY KEY, email TEXT, refresh_token TEXT NOT NULL,
         access_token TEXT, access_expires_at INTEGER NOT NULL DEFAULT 0,
         project_id TEXT, status TEXT NOT NULL DEFAULT 'active',
-        cooldown_until INTEGER, last_error TEXT,
+        cooldown_until INTEGER, last_error TEXT, quota_summary_error TEXT,
+        paid_tier_id TEXT, paid_tier_name TEXT,
         enabled INTEGER NOT NULL DEFAULT 1, priority INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL, last_used_at INTEGER
-      );
-      CREATE TABLE IF NOT EXISTS quota_snapshots (
-        account_id TEXT NOT NULL, model_id TEXT NOT NULL, window TEXT NOT NULL,
-        remaining_fraction REAL NOT NULL, reset_at INTEGER, fetched_at INTEGER NOT NULL,
-        PRIMARY KEY (account_id, model_id, window)
       );
       CREATE TABLE IF NOT EXISTS oauth_pending (
         state TEXT PRIMARY KEY, code_verifier TEXT NOT NULL, created_at INTEGER NOT NULL
       );
     `);
+    // quota_snapshots is created by the migrator, not here: the migrator's job is to
+    // drop a previous shape and install the current one, in one place.
+    this.migrate();
     // Reinforcement: WAL just created the sidecars; ensure 0600 on them too.
     this.applyRestrictiveMode(dbPath);
+  }
+
+  /**
+   * Brings an existing database to the current schema, once.
+   *
+   * Versioned through `PRAGMA user_version` because the v1 step is destructive: without
+   * the guard the quota table would be rebuilt at every boot and no snapshot would
+   * outlive a restart (spec §7). The accounts table is never dropped: it holds the
+   * refresh tokens, which are not derived cache.
+   */
+  private migrate(): void {
+    const row = this.db.prepare("PRAGMA user_version").get() as
+      | { user_version?: number }
+      | undefined;
+    if ((row?.user_version ?? 0) >= SCHEMA_VERSION) return;
+
+    // v1: quota rows move from one per model to one per bucket. Derived cache,
+    // repopulated by the next refresh, so dropping it is safe (spec §7).
+    this.db.exec("DROP TABLE IF EXISTS quota_snapshots");
+    this.db.exec(`
+      CREATE TABLE quota_snapshots (
+        account_id TEXT NOT NULL, bucket_id TEXT NOT NULL, window TEXT NOT NULL,
+        display_name TEXT, group_name TEXT, group_description TEXT, bucket_description TEXT,
+        remaining_fraction REAL NOT NULL, reset_at INTEGER, fetched_at INTEGER NOT NULL,
+        PRIMARY KEY (account_id, bucket_id)
+      );
+    `);
+    const added: Array<[string, string]> = [
+      ["quota_summary_error", "TEXT"],
+      ["paid_tier_id", "TEXT"],
+      ["paid_tier_name", "TEXT"],
+    ];
+    for (const [column, type] of added) {
+      if (!this.hasColumn("accounts", column)) {
+        // Column names are literals from this table, never caller input, so the
+        // interpolation cannot be injected through.
+        this.db.exec(`ALTER TABLE accounts ADD COLUMN ${column} ${type}`);
+      }
+    }
+    this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+  }
+
+  private hasColumn(table: string, column: string): boolean {
+    const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as unknown as Array<{
+      name: string;
+    }>;
+    return rows.some((row) => row.name === column);
+  }
+
+  /** Test seam: the raw handle, so schema assertions need no second connection. */
+  raw(): DatabaseSync {
+    return this.db;
   }
 
   private applyRestrictiveMode(dbPath: string): void {
@@ -131,7 +201,8 @@ export class AccountStore {
          ON CONFLICT(id) DO UPDATE SET
            email = excluded.email, refresh_token = excluded.refresh_token,
            access_token = excluded.access_token, access_expires_at = excluded.access_expires_at,
-           project_id = excluded.project_id, status = 'active', cooldown_until = NULL, last_error = NULL`,
+           project_id = excluded.project_id, status = 'active', cooldown_until = NULL,
+           last_error = NULL, quota_summary_error = NULL`,
       )
       .run(input.id, input.email, input.refreshToken, input.accessToken, input.accessExpiresAt, input.projectId, now);
     const account = this.getAccount(input.id);
@@ -181,6 +252,28 @@ export class AccountStore {
       .run(status, status === "cooldown" ? (opts.cooldownUntil ?? null) : null, opts.lastError ?? null, id);
   }
 
+  /**
+   * Records why the quota summary could not be read, or clears it. Kept apart from
+   * `lastError`: this is a diagnostics note about a read, not a state the account is in,
+   * and the account stays as eligible as it was (spec §11).
+   */
+  setQuotaSummaryError(id: string, error: string | null): void {
+    this.db.prepare("UPDATE accounts SET quota_summary_error = ? WHERE id = ?").run(error, id);
+  }
+
+  /**
+   * Stores the account's tier, both halves (spec D15): the id is the stable
+   * discriminator a caller can branch on, the name is the label a person reads.
+   *
+   * Writes what it is given, nulls included. Preserving a previous tier when a read
+   * fails is the caller's decision, not a setter's (spec §13).
+   */
+  setPaidTier(id: string, tier: { id: string | null; name: string | null }): void {
+    this.db
+      .prepare("UPDATE accounts SET paid_tier_id = ?, paid_tier_name = ? WHERE id = ?")
+      .run(tier.id, tier.name, id);
+  }
+
   setTokens(id: string, tokens: { accessToken: string; accessExpiresAt: number }): void {
     this.db
       .prepare("UPDATE accounts SET access_token = ?, access_expires_at = ? WHERE id = ?")
@@ -204,34 +297,59 @@ export class AccountStore {
     this.db.prepare("DELETE FROM accounts WHERE id = ?").run(id);
   }
 
-  saveQuota(rows: QuotaSnapshot[]): void {
-    const stmt = this.db.prepare(
-      `INSERT INTO quota_snapshots (account_id, model_id, window, remaining_fraction, reset_at, fetched_at)
-       VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT(account_id, model_id, window) DO UPDATE SET
-         remaining_fraction = excluded.remaining_fraction,
-         reset_at = excluded.reset_at, fetched_at = excluded.fetched_at`,
+  /**
+   * Sets the account's quota to exactly these rows, replacing whatever was there.
+   * An empty list clears the snapshot, which is what a failed read must produce:
+   * the reading is "as of fetchedAt", and a lingering row would contradict the
+   * account's reported state (spec §11).
+   */
+  replaceQuota(accountId: string, rows: Array<Omit<QuotaBucket, "accountId">>): void {
+    this.db.prepare("DELETE FROM quota_snapshots WHERE account_id = ?").run(accountId);
+    const insert = this.db.prepare(
+      `INSERT INTO quota_snapshots
+         (account_id, bucket_id, window, display_name, group_name, group_description,
+          bucket_description, remaining_fraction, reset_at, fetched_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     for (const row of rows) {
-      stmt.run(row.accountId, row.modelId, row.window, row.remainingFraction, row.resetAt, row.fetchedAt);
+      insert.run(
+        accountId,
+        row.bucketId,
+        row.window,
+        row.displayName,
+        row.groupName,
+        row.groupDescription,
+        row.bucketDescription,
+        row.remainingFraction,
+        row.resetAt,
+        row.fetchedAt,
+      );
     }
   }
 
-  getQuota(accountId: string): QuotaSnapshot[] {
+  getQuota(accountId: string): QuotaBucket[] {
     const rows = this.db
       .prepare("SELECT * FROM quota_snapshots WHERE account_id = ?")
       .all(accountId) as unknown as Array<{
       account_id: string;
-      model_id: string;
+      bucket_id: string;
       window: string;
+      display_name: string | null;
+      group_name: string | null;
+      group_description: string | null;
+      bucket_description: string | null;
       remaining_fraction: number;
       reset_at: number | null;
       fetched_at: number;
     }>;
     return rows.map((row) => ({
       accountId: row.account_id,
-      modelId: row.model_id,
+      bucketId: row.bucket_id,
       window: row.window,
+      displayName: row.display_name,
+      groupName: row.group_name,
+      groupDescription: row.group_description,
+      bucketDescription: row.bucket_description,
       remainingFraction: row.remaining_fraction,
       resetAt: row.reset_at,
       fetchedAt: row.fetched_at,
