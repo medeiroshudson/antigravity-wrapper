@@ -125,20 +125,54 @@ error, and no amount of console fiddling changes it.
 Practical consequence: the working client is the one the Antigravity application itself
 ships with, which is why it grants those scopes.
 
-### Option A — extract it from an installed Antigravity or Gemini CLI
+### Option A — extract it from an installed Antigravity app or Gemini CLI
 
-If you already have one of those installed, the client is in the package. Search the
-install directory (typically under `~/.npm`, `/usr/lib/node_modules`, or the application
-bundle) for the client-id shape:
+If you already have one of those installed, the pair is embedded in the package, but
+**where** depends on the platform — and on macOS the obvious search paths are all wrong.
+
+#### macOS — Antigravity.app
+
+The credentials are compiled into the **native language server binary** inside the app
+bundle. They are *not* in the JavaScript bundle (`app.asar`), and *not* under
+`~/Library/Application Support/Antigravity`, which holds Electron app data rather than
+code.
+
+```bash
+grep -ao '[0-9]\{6,\}-[a-z0-9]\{10,\}\.apps\.googleusercontent\.com' \
+  /Applications/Antigravity.app/Contents/Resources/bin/language_server | sort -u
+```
+
+Two details matter:
+
+- **`-a` is required.** The target is a ~155 MB binary, and without `-a` grep treats it as
+  binary and suppresses match output entirely — you get no error and no result.
+- **Never `grep -r` across `~/Library/Application Support`.** That tree is enormous, and an
+  unbounded recursive search there does not fail — it appears to hang, which reads as a
+  broken command rather than a wrong target.
+
+Expect **two** client ids: the app carries one for itself and one for another Google tool.
+Only a matching id/secret pair works, and a mismatch fails at the token exchange with
+`invalid_client`. Get the secrets with the same method:
+
+```bash
+grep -ao 'GOCSPX-[A-Za-z0-9_-]\{10,\}' \
+  /Applications/Antigravity.app/Contents/Resources/bin/language_server | sort -u
+```
+
+#### Linux and npm-based installs
+
+Search the install roots — typically `~/.npm`, `/usr/lib/node_modules`, or the application
+bundle:
 
 ```bash
 grep -roh '[0-9]\{6,\}-[a-z0-9]\{10,\}\.apps\.googleusercontent\.com' \
-  ~/.npm /usr/lib/node_modules "$HOME/Library/Application Support" 2>/dev/null | sort -u
+  ~/.npm /usr/lib/node_modules 2>/dev/null | sort -u
 ```
 
-Then locate the `GOCSPX-` string near it in the same package to get the secret. Sanity-check
-before use: the id ends in `.apps.googleusercontent.com` and the secret starts with
-`GOCSPX-`. A pair that fails either check is the wrong literal.
+#### Sanity-check the pair
+
+Before use, confirm both halves: the id ends in `.apps.googleusercontent.com` and the
+secret starts with `GOCSPX-`. A pair that fails either check is the wrong literal.
 
 ### Option B — set your own values
 
