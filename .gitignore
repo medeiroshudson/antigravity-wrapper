@@ -1,0 +1,12 @@
+node_modules/
+dist/
+data/
+.env
+*.db
+*.db-wal
+*.db-shm
+.DS_Store
+.superpowers/
+# Design notes and the implementation plan stay local: they document the reasoning
+# behind decisions but are not part of the published project.
+docs/superpowers/

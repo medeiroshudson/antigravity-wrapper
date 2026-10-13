@@ -1,0 +1,31 @@
+services:
+  antigravity-wrapper:
+    build: .
+    image: antigravity-wrapper:local
+    container_name: antigravity-wrapper
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: "3000"
+      HOST: "0.0.0.0"
+      API_KEY: "${API_KEY:?API_KEY is required}"
+      DB_PATH: "/app/data/antigravity.db"
+      ANTIGRAVITY_CLIENT_ID: "${ANTIGRAVITY_CLIENT_ID:?ANTIGRAVITY_CLIENT_ID is required}"
+      ANTIGRAVITY_CLIENT_SECRET: "${ANTIGRAVITY_CLIENT_SECRET:?ANTIGRAVITY_CLIENT_SECRET is required}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+    volumes:
+      - antigravity-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/health',{headers:{Authorization:'Bearer '+process.env.API_KEY}}).then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  antigravity-data:
