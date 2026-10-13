@@ -579,7 +579,8 @@ is embedded in the code.
 | `STREAM_STALL_TIMEOUT_MS` | `120000` | Deadline for silence mid-stream |
 | `QUOTA_REFRESH_TTL_MS` | `300000` | Quota snapshot TTL |
 | `MODELS_TTL_MS` | `14400000` | Model catalog TTL |
-| `COOLDOWN_TRANSIENT_MS` | `60000` | Cooldown for a `429` without a reset hint |
+| `COOLDOWN_TRANSIENT_MS` | `60000` | Fallback cooldown when a quota wall names no reset time |
+| `TRANSIENT_RETRY_BACKOFF_MS` | `1000` | Wait before retrying the same account after a transient throttle (`0` retries at once) |
 | `MAX_FAILOVER_ATTEMPTS` | `3` | Ceiling on accounts tried per request |
 | `LOG_LEVEL` | `info` | Logger level |
 | `APP_LOCALE` | `en-US` | Locale for the messages the API returns; an unknown value falls back to `en-US` |
@@ -606,9 +607,14 @@ of the pool. Candidates are ordered like this:
 4. **Priority overrides all of it** — an explicit `priority` sorts ahead of the quota tiers.
 
 **Cooldown on a quota wall.** A `429` carrying a wall signal (`Resets in …`, quota
-exceeded) puts the account in `cooldown` until the reset time the backend named. A
-transient `429` without that signal gets a short retry and moves on without changing the
-account's state.
+exceeded) puts the account in `cooldown` until the reset time the backend named.
+
+**A transient `429` does neither.** Throttling that carries no wall signal — pressure on
+the backend, not an exhausted quota — leaves the pool untouched: the account stays
+eligible, the request retries it once after `TRANSIENT_RETRY_BACKOFF_MS`, and only then
+moves on. Cooling the account down instead would sideline a healthy account for the whole
+cooldown window, which with a one-account pool means every request answering `503` while
+its quota is still nearly full.
 
 **Failover only before the first byte.** The selector returns the whole ordered list and
 the transport walks it. While nothing has been written to the client, a recoverable
