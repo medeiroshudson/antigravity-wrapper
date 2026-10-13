@@ -234,9 +234,21 @@ not fail the login), and stores everything:
 }
 ```
 
-`paidTier` is `null` when the backend reports no paid tier for the account. The account
-is still registered and usable, but expect no usable quota. The email is always returned
-**masked**; when it could not be read, `id` is the only label.
+`paidTier` is the **name** of the tier the backend reports for the account, or `null`
+when it reports no usable name. Presence of the value is not subscription proof: an
+account with no paid subscription reports the tier name **"Antigravity Starter
+Quota"**, so a non-null `paidTier` does not by itself mean a subscription is active.
+The string is backend copy — read it as a label, not as a stable identifier.
+
+Such an account still serves requests normally. What it lacks is a **quota summary**,
+which the backend gates behind a subscription: the summary endpoint answers
+`403 SUBSCRIPTION_REQUIRED`, so the account shows no quota groups and is scheduled
+after the accounts whose quota can be measured. It is never disabled for this. To
+place it deliberately, raise its `priority` — that outranks quota in the selection
+order.
+
+The email is always returned **masked**; when it could not be read, `id` is the only
+label.
 
 Adding more accounts is repeating these three steps, with the same Google account or a
 different one. Each `start` mints an independent `state`, so logins can even run in
@@ -247,11 +259,11 @@ email.
 
 | Response | Meaning |
 |---|---|
-| `500` + "…sao obrigatorios" | `ANTIGRAVITY_CLIENT_ID` / `_CLIENT_SECRET` missing from the process environment |
-| `400` `callbackUrl e obrigatorio` | Empty or absent body field |
-| `400` `callbackUrl invalida` | Not parseable as a URL — usually a bare query string instead of the full URL |
-| `400` `callbackUrl sem code ou state` | URL parsed, but one of the two query parameters is absent |
-| `400` `state desconhecido ou expirado` | The `state` was already consumed, never existed, or passed its 5-minute TTL |
+| `500` + "ANTIGRAVITY_CLIENT_ID and ANTIGRAVITY_CLIENT_SECRET are required" | `ANTIGRAVITY_CLIENT_ID` / `_CLIENT_SECRET` missing from the process environment |
+| `400` `callbackUrl is required` | Empty or absent body field |
+| `400` `callbackUrl is not a valid URL` | Not parseable as a URL — usually a bare query string instead of the full URL |
+| `400` `callbackUrl is missing code or state` | URL parsed, but one of the two query parameters is absent |
+| `400` `state is unknown or expired; restart the login` | The `state` was already consumed, never existed, or passed its 5-minute TTL |
 
 ---
 
