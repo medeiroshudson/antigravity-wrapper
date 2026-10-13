@@ -279,7 +279,6 @@ describe("AccountStore migration", () => {
 
   it("keeps the accounts and their tokens while rebuilding the quota table", () => {
     const path = join(dir, "legacy.db");
-    store.close();
     seedLegacyDatabase(path);
 
     const migrated = new AccountStore(path);
@@ -296,7 +295,6 @@ describe("AccountStore migration", () => {
 
   it("adds the tier columns to a legacy database as nulls, not as a tier", () => {
     const path = join(dir, "legacy.db");
-    store.close();
     seedLegacyDatabase(path);
 
     const migrated = new AccountStore(path);
@@ -313,7 +311,6 @@ describe("AccountStore migration", () => {
 
   it("is a no-op on a second start, so snapshots survive a restart", () => {
     const path = join(dir, "legacy.db");
-    store.close();
     seedLegacyDatabase(path);
 
     const first = new AccountStore(path);
@@ -329,7 +326,6 @@ describe("AccountStore migration", () => {
 
   it("creates the current schema on a fresh database", () => {
     const path = join(dir, "fresh.db");
-    store.close();
     const fresh = new AccountStore(path);
     const version = fresh.raw().prepare("PRAGMA user_version").get() as
       | { user_version?: number }
