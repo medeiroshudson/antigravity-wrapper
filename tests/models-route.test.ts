@@ -11,7 +11,6 @@ const auth = { authorization: "Bearer test-key" };
 
 beforeEach(() => {
   store = new AccountStore(":memory:");
-  applyCatalog(CATALOG);
   app = buildServer("test-key", { store, logger: false });
 });
 
@@ -22,12 +21,6 @@ afterEach(async () => {
 });
 
 describe("GET /v1/models", () => {
-  // The file-level beforeEach fills the registry for the pre-existing date-contract test.
-  // These route tests each state their own registry, so start each from empty.
-  beforeEach(() => {
-    resetRegistryForTests();
-  });
-
   it("returns the list in the OpenAI format", async () => {
     applyCatalog(CATALOG);
     const response = await app.inject({ method: "GET", url: "/v1/models", headers: auth });
@@ -111,6 +104,12 @@ describe("GET /health", () => {
 });
 
 describe("the OpenAI surface keeps the OpenAI date contract", () => {
+  // These model objects carry no date field at all; the assertion below needs a non-empty
+  // list, and the registry has no static fallback, so the catalog is applied here.
+  beforeEach(() => {
+    applyCatalog(CATALOG);
+  });
+
   it("does not introduce a date field on the model objects", async () => {
     const response = await app.inject({
       method: "GET",
