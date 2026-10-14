@@ -9,136 +9,212 @@ export function normalizeEffort(raw: unknown): ReasoningEffort {
     : "off";
 }
 
-export interface PublicModel {
+/** One entry as the catalog reports it. Numbers are null when the backend omits them. */
+export interface CatalogEntry {
   id: string;
-  name: string;
+  displayName: string | null;
+  maxTokens: number | null;
+  maxOutputTokens: number | null;
+  supportsThinking: boolean;
+  thinkingBudget: number | null;
+}
+
+export interface CatalogVariant {
+  runtimeId: string;
+  /** The effort suffix this runtime id carried, or null for the canonical id. */
+  suffix: string | null;
+  degree: number;
+  maxOutputTokens: number;
+  supportsThinking: boolean;
+  thinkingBudget: number;
+}
+
+export interface CatalogModel {
+  id: string;
+  label: string;
   contextWindow: number;
   maxTokens: number;
+  variants: CatalogVariant[];
 }
 
-export const PUBLIC_MODELS: readonly PublicModel[] = [
-  { id: "gemini-3.8-flash", name: "Gemini 3.8 Flash", contextWindow: 1_048_576, maxTokens: 65_536 },
-  { id: "gemini-3.7-flash", name: "Gemini 3.7 Flash", contextWindow: 1_048_576, maxTokens: 65_536 },
-  { id: "gemini-3.6-flash", name: "Gemini 3.6 Flash", contextWindow: 1_048_576, maxTokens: 65_536 },
-  { id: "gemini-3.5-flash", name: "Gemini 3.5 Flash", contextWindow: 1_048_576, maxTokens: 65_536 },
-  { id: "gemini-3.1-pro", name: "Gemini 3.1 Pro", contextWindow: 1_048_576, maxTokens: 65_535 },
-  { id: "gpt-oss-120b", name: "GPT-OSS 120B", contextWindow: 131_072, maxTokens: 32_768 },
-];
+/**
+ * The effort suffixes, longest first so `-extra-low` is consumed before `-low` matches
+ * inside it. `-lite`, `-pro` and `-flash` are absent on purpose: they are identity, not
+ * effort (spec D2, D3).
+ */
+const EFFORT_SUFFIXES = ["extra-low", "extra-high", "low", "medium", "high", "thinking", "tiered", "agent"] as const;
 
-/** id publico -> runtime id por esforco. `default` cobre off/minimal. */
-const ROUTING: Record<string, Partial<Record<ReasoningEffort, string>> & { default: string }> = {
-  "gemini-3.8-flash": {
-    default: "gemini-3.8-flash-low",
-    minimal: "gemini-3.8-flash-low",
-    low: "gemini-3.8-flash-low",
-    medium: "gemini-3.8-flash-medium",
-    high: "gemini-3.8-flash-high",
-    xhigh: "gemini-3.8-flash-high",
-  },
-  "gemini-3.7-flash": {
-    default: "gemini-3.7-flash-low",
-    minimal: "gemini-3.7-flash-low",
-    low: "gemini-3.7-flash-low",
-    medium: "gemini-3.7-flash-medium",
-    high: "gemini-3.7-flash-high",
-    xhigh: "gemini-3.7-flash-high",
-  },
-  "gemini-3.6-flash": {
-    default: "gemini-3.6-flash-low",
-    minimal: "gemini-3.6-flash-low",
-    low: "gemini-3.6-flash-low",
-    medium: "gemini-3.6-flash-medium",
-    high: "gemini-3.6-flash-high",
-    xhigh: "gemini-3.6-flash-high",
-  },
-  "gemini-3.5-flash": {
-    default: "gemini-3.5-flash-extra-low",
-    minimal: "gemini-3.5-flash-extra-low",
-    low: "gemini-3.5-flash-extra-low",
-    medium: "gemini-3.5-flash-low",
-    high: "gemini-3-flash-agent",
-    xhigh: "gemini-3-flash-agent",
-  },
-  "gemini-3.1-pro": {
-    default: "gemini-3.1-pro-low",
-    minimal: "gemini-3.1-pro-low",
-    low: "gemini-3.1-pro-low",
-    medium: "gemini-3.1-pro-low",
-    high: "gemini-pro-agent",
-    xhigh: "gemini-pro-agent",
-  },
-  "gpt-oss-120b": { default: "gpt-oss-120b-medium" },
+/**
+ * How much reasoning a suffix asks for. 2 is the canonical id with no suffix. An
+ * unrecognised suffix takes the canonical degree rather than throwing.
+ */
+const DEGREE: Record<string, number> = {
+  "extra-low": 0,
+  low: 1,
+  medium: 3,
+  thinking: 3,
+  high: 4,
+  "extra-high": 4,
+  tiered: 4,
+  agent: 4,
+};
+const CANONICAL_DEGREE = 2;
+
+/** The degree each effort asks for; -1 means "the lowest this model offers". */
+const TARGET_DEGREE: Record<ReasoningEffort, number> = {
+  off: -1,
+  minimal: -1,
+  low: 1,
+  medium: 3,
+  high: 4,
+  xhigh: 4,
 };
 
+const FALLBACK_MAX_OUTPUT_TOKENS = 64_000;
+
+function isCatalogModel(id: string): boolean {
+  if (!/^(gemini-|claude-|gpt-)/i.test(id)) return false;
+  if (/^(chat_|tab_)/i.test(id)) return false;
+  if (/image/i.test(id)) return false;
+  return true;
+}
+
+function splitSuffix(runtimeId: string): { base: string; suffix: string | null } {
+  for (const suffix of EFFORT_SUFFIXES) {
+    if (runtimeId.endsWith(`-${suffix}`)) {
+      return { base: runtimeId.slice(0, -(suffix.length + 1)), suffix };
+    }
+  }
+  return { base: runtimeId, suffix: null };
+}
+
+/** The backend's label with its effort parenthesis removed, or the fallback. */
+function labelOf(entry: CatalogEntry, fallback: string): string {
+  const raw = entry.displayName?.trim();
+  if (!raw || raw === "-") return fallback;
+  const stripped = raw.replace(/\s*\([^)]*\)\s*$/, "").trim();
+  return stripped.length > 0 ? stripped : fallback;
+}
+
+/**
+ * The registry keyed by public id. It **accumulates**: discovery runs per account, so a
+ * second account's catalog adds to the first rather than replacing it. That is what makes
+ * the advertised list the union of the pool (spec D8) and what keeps the last good catalog
+ * across a failed refresh (spec §8).
+ */
+let registry = new Map<string, CatalogModel>();
+
+/**
+ * Folds catalog entries into the registry.
+ *
+ * Entries are sorted by runtime id first, so the outcome does not depend on the backend's
+ * JSON key order: a group's label and its variant order are then the same on every run.
+ */
+export function applyCatalog(entries: readonly CatalogEntry[]): void {
+  for (const entry of [...entries].sort((left, right) => left.id.localeCompare(right.id))) {
+    const runtimeId = entry.id.trim();
+    if (!isCatalogModel(runtimeId)) continue;
+
+    const { base, suffix } = splitSuffix(runtimeId);
+    const variant: CatalogVariant = {
+      runtimeId,
+      suffix,
+      degree: suffix === null ? CANONICAL_DEGREE : (DEGREE[suffix] ?? CANONICAL_DEGREE),
+      maxOutputTokens: entry.maxOutputTokens ?? 0,
+      supportsThinking: entry.supportsThinking,
+      thinkingBudget: entry.thinkingBudget ?? 0,
+    };
+
+    const existing = registry.get(base);
+    if (existing) {
+      if (!existing.variants.some((known) => known.runtimeId === runtimeId)) {
+        existing.variants.push(variant);
+      }
+      // A real label beats a fallback wherever in the group it arrives: the `-tiered`
+      // entry carries "-", so without this a group could be labelled by its id.
+      if (existing.label === existing.id) {
+        const label = labelOf(entry, existing.id);
+        if (label !== existing.id) existing.label = label;
+      }
+      continue;
+    }
+
+    registry.set(base, {
+      id: base,
+      label: labelOf(entry, base),
+      contextWindow: entry.maxTokens ?? 0,
+      maxTokens: entry.maxOutputTokens ?? 0,
+      variants: [variant],
+    });
+  }
+}
+
+export function getPublicModels(): readonly CatalogModel[] {
+  return [...registry.values()];
+}
+
+function findVariant(runtimeId: string): CatalogVariant | undefined {
+  for (const model of registry.values()) {
+    const found = model.variants.find((variant) => variant.runtimeId === runtimeId);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/**
+ * The runtime id to send for a public id at a given effort (spec D5, D6).
+ *
+ * Nearest degree to what the effort asks, ties going **down** so a request is never
+ * silently promoted to a more expensive model; among variants that are equally near, the
+ * one whose suffix matches the effort name wins, then the lower degree, then the
+ * lexicographically first id. A group with one variant returns it for every effort, which
+ * is what makes `claude-opus-4-6` reach `claude-opus-4-6-thinking`.
+ */
 export function resolveRuntimeModel(publicId: string, effort: ReasoningEffort): string {
-  const route = ROUTING[publicId];
-  if (!route) return publicId;
-  return route[effort] ?? route.default;
+  const model = registry.get(publicId);
+  if (!model || model.variants.length === 0) return publicId;
+  const [only] = model.variants;
+  if (model.variants.length === 1 && only) return only.runtimeId;
+
+  const variants = [...model.variants].sort((left, right) =>
+    left.runtimeId.localeCompare(right.runtimeId),
+  );
+  const requested = TARGET_DEGREE[effort];
+  const target =
+    requested < 0 ? Math.min(...variants.map((variant) => variant.degree)) : requested;
+
+  let nearest = Number.POSITIVE_INFINITY;
+  for (const variant of variants) {
+    nearest = Math.min(nearest, Math.abs(variant.degree - target));
+  }
+  const candidates = variants.filter((variant) => Math.abs(variant.degree - target) === nearest);
+
+  const byName = candidates.find((variant) => variant.suffix === effort);
+  if (byName) return byName.runtimeId;
+
+  const lowest = Math.min(...candidates.map((variant) => variant.degree));
+  const tied = candidates.filter((variant) => variant.degree === lowest);
+  const [chosen] = tied;
+  return (chosen ?? variants[0])?.runtimeId ?? publicId;
 }
 
-const MAX_OUTPUT: Record<string, number> = {
-  "gpt-oss-120b-medium": 32_768,
-  "gemini-3.1-pro-low": 65_535,
-  "gemini-pro-agent": 65_535,
-};
-
-export function getMaxOutputTokens(runtimeModel: string): number {
-  const exact = MAX_OUTPUT[runtimeModel];
-  if (exact !== undefined) return exact;
-  if (runtimeModel.startsWith("gpt-oss-")) return 32_768;
-  if (runtimeModel.startsWith("gemini-3.1-pro") || runtimeModel === "gemini-pro-agent") return 65_535;
-  if (runtimeModel.startsWith("gemini-")) return 65_536;
-  return 64_000;
-}
-
-/** Valores de thinkingBudget do CLI oficial, por familia. */
+/** The catalog's own budget for the model, with `off` still forcing thinking away. */
 export function getThinkingConfig(
-  runtimeModel: string,
+  runtimeId: string,
   effort: ReasoningEffort,
 ): { includeThoughts: boolean; thinkingBudget: number } {
   if (effort === "off") return { includeThoughts: false, thinkingBudget: 0 };
-  const high = effort === "high" || effort === "xhigh";
-
-  if (runtimeModel.startsWith("claude-")) return { includeThoughts: true, thinkingBudget: 1024 };
-  if (runtimeModel.startsWith("gpt-oss-")) return { includeThoughts: true, thinkingBudget: 8192 };
-  if (runtimeModel.startsWith("gemini-3.5-flash") || runtimeModel === "gemini-3-flash-agent") {
-    return { includeThoughts: true, thinkingBudget: high ? 10_000 : effort === "medium" ? 4_000 : 1_000 };
-  }
-  if (runtimeModel.startsWith("gemini-3.1-pro") || runtimeModel === "gemini-pro-agent") {
-    return { includeThoughts: true, thinkingBudget: high ? 10_001 : 1_001 };
-  }
-  if (runtimeModel.startsWith("gemini-")) {
-    return { includeThoughts: true, thinkingBudget: high ? -1 : effort === "medium" ? 4_000 : 1_000 };
-  }
-  return { includeThoughts: false, thinkingBudget: 0 };
+  const variant = findVariant(runtimeId);
+  if (!variant || !variant.supportsThinking) return { includeThoughts: false, thinkingBudget: 0 };
+  return { includeThoughts: true, thinkingBudget: variant.thinkingBudget };
 }
 
-let discovered: PublicModel[] = [...PUBLIC_MODELS];
-
-export function getPublicModels(): readonly PublicModel[] {
-  return discovered;
+export function getMaxOutputTokens(runtimeId: string): number {
+  const variant = findVariant(runtimeId);
+  if (!variant || variant.maxOutputTokens <= 0) return FALLBACK_MAX_OUTPUT_TOKENS;
+  return variant.maxOutputTokens;
 }
 
-/** Merges an account's catalog into the static table, so discovered ids become selectable. */
-export function applyDiscoveredModels(models: Record<string, unknown>): void {
-  const merged = new Map(PUBLIC_MODELS.map((model) => [model.id, model]));
-  for (const rawId of Object.keys(models)) {
-    const id = rawId.trim();
-    if (!/^(gemini-|claude-|gpt-oss-)/i.test(id)) continue;
-    if (/^(chat_|tab_)/i.test(id) || /image/i.test(id)) continue;
-    const publicId = id.replace(/-(low|medium|high|extra-low|extra-high|thinking|tiered)$/, "");
-    if (!merged.has(publicId)) {
-      merged.set(publicId, {
-        id: publicId,
-        name: publicId,
-        contextWindow: 0,
-        maxTokens: getMaxOutputTokens(id),
-      });
-    }
-  }
-  discovered = [...merged.values()];
-}
-
-export function resetDiscoveredModelsForTests(): void {
-  discovered = [...PUBLIC_MODELS];
+export function resetRegistryForTests(): void {
+  registry = new Map<string, CatalogModel>();
 }

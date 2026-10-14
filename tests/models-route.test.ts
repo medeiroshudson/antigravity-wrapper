@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildServer } from "../src/server.js";
 import { AccountStore } from "../src/lib/accounts/store.js";
-import { resetDiscoveredModelsForTests } from "../src/config/models.js";
+import { resetRegistryForTests } from "../src/config/models.js";
 
 let app: FastifyInstance;
 let store: AccountStore;
@@ -16,7 +16,7 @@ beforeEach(() => {
 afterEach(async () => {
   await app.close();
   store.close();
-  resetDiscoveredModelsForTests();
+  resetRegistryForTests();
 });
 
 describe("GET /v1/models", () => {

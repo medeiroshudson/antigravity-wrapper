@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildServer } from "../src/server.js";
 import { AccountStore } from "../src/lib/accounts/store.js";
-import { resetDiscoveredModelsForTests } from "../src/config/models.js";
+import { resetRegistryForTests } from "../src/config/models.js";
 
 const auth = { authorization: "Bearer test-key" };
 const ENV = { ANTIGRAVITY_CLIENT_ID: "c", ANTIGRAVITY_CLIENT_SECRET: "s" };
@@ -81,7 +81,7 @@ beforeEach(() => {
 afterEach(async () => {
   await app.close();
   store.close();
-  resetDiscoveredModelsForTests();
+  resetRegistryForTests();
 });
 
 describe("POST /v1/chat/completions", () => {

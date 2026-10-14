@@ -6,7 +6,7 @@ import { AccountService } from "../src/lib/accounts/service.js";
 import { AccountStore } from "../src/lib/accounts/store.js";
 import { TurnRunner } from "../src/lib/chat/turn.js";
 import { UpstreamError } from "../src/lib/antigravity/errors.js";
-import { getPublicModels, resetDiscoveredModelsForTests } from "../src/config/models.js";
+import { getPublicModels, resetRegistryForTests } from "../src/config/models.js";
 
 const ENV = { ANTIGRAVITY_CLIENT_ID: "cid", ANTIGRAVITY_CLIENT_SECRET: "sec" };
 let dir: string;
@@ -20,7 +20,7 @@ beforeEach(() => {
 afterEach(() => {
   store.close();
   rmSync(dir, { recursive: true, force: true });
-  resetDiscoveredModelsForTests();
+  resetRegistryForTests();
 });
 
 function seed(id = "a1", over: { accessExpiresAt?: number } = {}) {
