@@ -313,13 +313,12 @@ describe("thoughtSignature on the OpenAI surface", () => {
 
 describe("discovered catalog", () => {
   it("makes a discovered model selectable and visible in /v1/models after the refresh", async () => {
-    // A runtime id, as the catalog really reports it: the Opus exists only in its
-    // thinking form. The old fixture passed the public id here, which is the id the
-    // backend answers 404 to.
+    // An id the file-level CATALOG does not contain, so the assertions below pass only if
+    // the refresh really fed the registry: with an id that beforeEach already supplies,
+    // this test would keep passing after `applyCatalog` was removed from `refreshQuota`.
     const catalog = {
       models: {
-        "claude-opus-4-6-thinking": { displayName: "Claude Opus 4.6 (Thinking)", maxTokens: 250_000, maxOutputTokens: 64_000, supportsThinking: true, thinkingBudget: 1024, quotaInfo: { remainingFraction: 1 } },
-        "gemini-3.8-flash-low": { displayName: "Gemini 3.8 Flash (Low)", maxTokens: 1_048_576, maxOutputTokens: 65_536, supportsThinking: true, thinkingBudget: 1000, quotaInfo: { remainingFraction: 1 } },
+        "gemini-3.6-flash-low": { displayName: "Gemini 3.6 Flash (Low)", maxTokens: 1_048_576, maxOutputTokens: 65_536, supportsThinking: true, thinkingBudget: 1000, quotaInfo: { remainingFraction: 1 } },
       },
     };
     const fetchImpl = vi.fn(async (url: string | URL) => {
@@ -344,10 +343,12 @@ describe("discovered catalog", () => {
 
     const models = await app.inject({ method: "GET", url: "/v1/models", headers: auth });
     const ids = (models.json().data as Array<{ id: string }>).map((m) => m.id);
-    // The public ids are derived from the runtime ones: the suffix becomes a variant.
-    expect(ids).toContain("claude-opus-4-6");
+    // Introduced by the refresh alone.
+    expect(ids).toContain("gemini-3.6-flash");
+    // Still present from the file-level catalog: the registry accumulates rather than replaces.
     expect(ids).toContain("gemini-3.8-flash");
-    expect(ids).not.toContain("gemini-3.8-flash-low");
+    // The runtime id is never advertised; only its public form.
+    expect(ids).not.toContain("gemini-3.6-flash-low");
 
     // Before the refresh the public id would 404; now the route accepts it and resolves
     // it to the runtime id that actually exists.
@@ -355,7 +356,7 @@ describe("discovered catalog", () => {
       method: "POST",
       url: "/v1/chat/completions",
       headers: auth,
-      payload: { model: "claude-opus-4-6", messages: [{ role: "user", content: "oi" }] },
+      payload: { model: "gemini-3.6-flash", messages: [{ role: "user", content: "oi" }] },
     });
     expect(chat.statusCode).toBe(200);
   });
