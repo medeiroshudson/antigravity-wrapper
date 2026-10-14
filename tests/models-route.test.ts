@@ -46,6 +46,8 @@ describe("the OpenAI surface keeps the OpenAI date contract", () => {
 
     // Model objects carry no date at all today. If one is ever added it must follow
     // OpenAI's `created` (epoch seconds) rather than the native ISO rule (spec D16).
+    // Fails closed: an empty list would make the loop below pass vacuously.
+    expect(body.data.length).toBeGreaterThan(0);
     for (const model of body.data) {
       for (const [key, value] of Object.entries(model)) {
         const looksIso = typeof value === "string" && /^\d{4}-\d{2}-\d{2}T/.test(value);

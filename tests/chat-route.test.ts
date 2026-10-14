@@ -419,4 +419,30 @@ describe("the OpenAI surface keeps the OpenAI date contract", () => {
     expect(seconds).toBeGreaterThan(1_700_000_000);
     expect(seconds).toBeLessThan(4_000_000_000);
   });
+
+  it("reports `created` as Unix seconds on the streaming chunks too", async () => {
+    app = buildServer("test-key", { store, env: ENV, fetchImpl: fetchOk(), logger: false });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: {
+        model: "gemini-3.8-flash",
+        stream: true,
+        messages: [{ role: "user", content: "hi" }],
+      },
+    });
+    // The streaming branch computes `created` on its own (`src/routes/chat.ts`),
+    // separately from the non-stream body, so it needs the same pin: a `toIsoUtc`
+    // applied only here would slip past the non-stream test and still break every
+    // client that computes `new Date(created * 1000)`.
+    const frame = response.body.split("\n\n").find((line) => line.startsWith("data: {"));
+    const chunk = JSON.parse(frame!.slice("data: ".length)) as { created?: unknown };
+
+    expect(typeof chunk.created).toBe("number");
+    expect(String(chunk.created)).not.toContain("-");
+    const seconds = chunk.created as number;
+    expect(seconds).toBeGreaterThan(1_700_000_000);
+    expect(seconds).toBeLessThan(4_000_000_000);
+  });
 });
