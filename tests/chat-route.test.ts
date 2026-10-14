@@ -392,3 +392,31 @@ describe("POST /v1/chat/completions over real HTTP", () => {
     expect(body.choices[0]?.message.content).toBe("ola");
   });
 });
+
+describe("the OpenAI surface keeps the OpenAI date contract", () => {
+  it("reports `created` as Unix seconds, not as ISO", async () => {
+    app = buildServer("test-key", { store, env: ENV, fetchImpl: fetchOk(), logger: false });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: {
+        model: "gemini-3.8-flash",
+        stream: false,
+        messages: [{ role: "user", content: "hi" }],
+      },
+    });
+    const body = response.json() as { created?: unknown };
+
+    // Spec D16: the native surface is ISO 8601 UTC, but this one follows the OpenAI
+    // contract — clients compute `new Date(created * 1000)`, and a string here makes
+    // that `Invalid Date`. The two formats are different contracts, not an oversight.
+    expect(typeof body.created).toBe("number");
+    expect(String(body.created)).not.toContain("-");
+    const seconds = body.created as number;
+    // A Unix timestamp in seconds for a plausible present-day instant: ten digits,
+    // not the thirteen an ISO conversion or a milliseconds value would have.
+    expect(seconds).toBeGreaterThan(1_700_000_000);
+    expect(seconds).toBeLessThan(4_000_000_000);
+  });
+});

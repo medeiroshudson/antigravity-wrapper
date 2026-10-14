@@ -34,3 +34,23 @@ describe("GET /health", () => {
     expect((await app.inject({ method: "GET", url: "/health", headers: auth })).statusCode).toBe(200);
   });
 });
+
+describe("the OpenAI surface keeps the OpenAI date contract", () => {
+  it("does not introduce a date field on the model objects", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/models",
+      headers: auth,
+    });
+    const body = response.json() as { data: Array<Record<string, unknown>> };
+
+    // Model objects carry no date at all today. If one is ever added it must follow
+    // OpenAI's `created` (epoch seconds) rather than the native ISO rule (spec D16).
+    for (const model of body.data) {
+      for (const [key, value] of Object.entries(model)) {
+        const looksIso = typeof value === "string" && /^\d{4}-\d{2}-\d{2}T/.test(value);
+        expect(looksIso, `${model.id}.${key} looks like an ISO date`).toBe(false);
+      }
+    }
+  });
+});
