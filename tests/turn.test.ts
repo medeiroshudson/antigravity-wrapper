@@ -122,7 +122,7 @@ describe("TurnRunner", () => {
     expect(accounts.applyFailure).toHaveBeenCalledTimes(1);
   });
 
-  it("does not fail over on 400 (client error)", async () => {
+  it("reports a 400 as a client error without changing account state", async () => {
     const fetchImpl = vi.fn(
       async () => new Response('{"error":{"message":"Invalid JSON payload"}}', { status: 400 }),
     ) as unknown as typeof fetch;
