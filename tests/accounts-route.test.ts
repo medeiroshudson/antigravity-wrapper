@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildServer } from "../src/server.js";
+import { resetRegistryForTests } from "../src/config/models.js";
 import { AccountStore } from "../src/lib/accounts/store.js";
 
 const auth = { authorization: "Bearer test-key" };
@@ -10,6 +11,9 @@ let store: AccountStore;
 
 beforeEach(() => {
   store = new AccountStore(":memory:");
+  // The model registry is module-level state shared across the file: reset it so a test
+  // that seeds a catalog cannot leak into another (and vice versa).
+  resetRegistryForTests();
 });
 
 afterEach(async () => {
@@ -61,6 +65,55 @@ describe("POST /admin/accounts/complete", () => {
     expect(body.accounts[0]?.projectId).toBe("aicode-consumers");
     // The email is captured at login and returned masked, never in clear text.
     expect(body.accounts[0]?.email).toBe("h***n@gmail.com");
+  });
+
+  it("seeds the model registry so /v1/models is not empty right after login", async () => {
+    // Without this, GET /v1/models stays empty until the first refresh tick
+    // (QUOTA_REFRESH_TTL_MS, five minutes by default), which reads as a broken deployment.
+    const fetchImpl = vi.fn(async (url: string | URL) => {
+      const href = String(url);
+      if (href.includes("oauth2.googleapis.com")) {
+        return new Response(JSON.stringify({ access_token: "at", refresh_token: "rt", expires_in: 3600 }));
+      }
+      if (href.includes("userinfo")) {
+        return new Response(JSON.stringify({ email: "hudson@gmail.com" }));
+      }
+      if (href.includes("fetchAvailableModels")) {
+        return new Response(
+          JSON.stringify({
+            models: {
+              "gemini-3.8-flash-low": {
+                displayName: "Gemini 3.8 Flash (Low)",
+                maxTokens: 1_048_576,
+                maxOutputTokens: 65_536,
+                supportsThinking: true,
+                thinkingBudget: 1000,
+              },
+            },
+          }),
+        );
+      }
+      return new Response(
+        JSON.stringify({ cloudaicompanionProject: "aicode-consumers", paidTier: { name: "Google AI Pro" } }),
+      );
+    }) as unknown as typeof fetch;
+
+    app = buildServer("test-key", { store, env: ENV, fetchImpl, logger: false });
+    const start = await app.inject({ method: "POST", url: "/admin/accounts/start", headers: auth });
+    const { state } = start.json() as { state: string };
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/admin/accounts/complete",
+      headers: auth,
+      payload: { callbackUrl: `http://localhost:51121/oauth-callback?code=xyz&state=${state}` },
+    });
+    expect(response.statusCode).toBe(200);
+
+    const models = await app.inject({ method: "GET", url: "/v1/models", headers: auth });
+    const body = models.json() as { data: Array<{ id: string }> };
+    // The public id is the runtime id without its effort suffix.
+    expect(body.data.map((model) => model.id)).toContain("gemini-3.8-flash");
   });
 
   it("rejects an unknown state", async () => {

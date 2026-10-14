@@ -82,6 +82,10 @@ export class TurnRunner {
     const limit = getMaxFailoverAttempts(this.deps.env);
     const backoffMs = getTransientRetryBackoffMs(this.deps.env);
     const failures: Array<{ accountId: string; kind: string; message: string }> = [];
+    // The first definitive error seen across the pool. A 404 is authoritative for an
+    // endpoint but not for an account (see the catch below), so it is remembered and only
+    // rethrown once every account has failed with the same kind.
+    let definitiveError: UpstreamError | null = null;
     const tried = new Set<string>();
 
     for (const candidate of candidates.slice(0, limit)) {
@@ -103,12 +107,21 @@ export class TurnRunner {
         } catch (error) {
           if (!(error instanceof UpstreamError)) throw error;
 
-          // A client error is not fixed by switching accounts, an error that arrived after
-          // the first content can no longer switch accounts, and a definitive failure --
-          // a model the backend does not have, a rejected request, a wrong fingerprint --
-          // fails identically everywhere. All three propagate to the caller as themselves
-          // rather than becoming an account-level failure (spec §6.2).
-          if (isDefinitive(error.kind) || fatalAfterContent.has(error)) throw error;
+          // After the first content the answer is on the wire, so switching accounts is
+          // over: that failure propagates as itself (spec §6.3).
+          if (fatalAfterContent.has(error)) throw error;
+
+          // Account vs endpoint asymmetry. For ENDPOINTS a 404 is authoritative -- a single
+          // backend, the primary channel is the authority, and `rpc.ts` already stops on it.
+          // For ACCOUNTS it is not: each account has its own catalog, so a model this one
+          // lacks may be present on the next. A definitive failure therefore fails over like
+          // any other account failure -- recorded, but with no state change -- and is
+          // rethrown below only once every account agrees (spec D10, §6.2).
+          if (isDefinitive(error.kind)) {
+            definitiveError ??= error;
+            failures.push({ accountId: candidate.id, kind: error.kind, message: error.message });
+            break;
+          }
 
           if (error.kind === "transient_rate_limit" && attempt < TRANSIENT_RETRIES) {
             if (backoffMs > 0) await sleep(backoffMs);
@@ -125,6 +138,15 @@ export class TurnRunner {
           break;
         }
       }
+    }
+
+    // A pool failure is only right when the accounts disagree. When every account rejected
+    // the request with the same definitive error -- a model absent from all of them -- that
+    // error is the answer: one clean 404 naming the model, not a pool failure that hides it
+    // (spec D10).
+    const definitive = definitiveError;
+    if (definitive && failures.every((failure) => failure.kind === definitive.kind)) {
+      throw definitive;
     }
 
     throw new AllAccountsFailedError(failures);

@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { getClientCredentials, maskEmail } from "../config/index.js";
+import { applyCatalog } from "../config/models.js";
 import { t } from "../i18n/index.js";
 import { AccountService } from "../lib/accounts/service.js";
 import {
@@ -10,6 +11,7 @@ import {
   generatePkce,
   getUserEmail,
 } from "../lib/antigravity/oauth.js";
+import { fetchAvailableModels } from "../lib/antigravity/quota.js";
 import { toIsoUtc, toResetPhrase } from "../lib/format/datetime.js";
 import { toGroupsView } from "../lib/format/quota.js";
 import { toOpenAIErrorBody } from "../lib/openai-format/index.js";
@@ -145,6 +147,17 @@ export async function accountsRoutes(app: FastifyInstance, deps: RouteDeps = {})
       // Login already has the tier in hand, so the first admin view is populated
       // without waiting for the refresh cycle (spec D14).
       store.setPaidTier(account.id, { id: project.paidTierId, name: project.paidTier });
+      // Seed the registry so `/v1/models` is not empty until the first refresh tick: the
+      // timer runs on QUOTA_REFRESH_TTL_MS (five minutes by default), and an empty model
+      // list reads as a broken deployment right after login. Best-effort -- the refresh
+      // cycle retries, and a login must not fail because a catalog read did.
+      const entries = await fetchAvailableModels({
+        accessToken: tokens.accessToken,
+        projectId: project.projectId,
+        env: deps.env,
+        fetchImpl: deps.fetchImpl,
+      }).catch(() => []);
+      if (entries.length > 0) applyCatalog(entries);
       // No top-level paidTier: the account object carries it as { id, name } (spec §9.1).
       reply.status(200).send({ account: publicView(store.getAccount(account.id)) });
     } catch (error) {
