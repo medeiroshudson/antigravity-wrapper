@@ -1,5 +1,5 @@
 import { getCooldownTransientMs } from "../../config/index.js";
-import { applyDiscoveredModels } from "../../config/models.js";
+import { applyCatalog } from "../../config/models.js";
 import { t } from "../../i18n/index.js";
 import { loadCodeAssistInfo, refreshAccessToken } from "../antigravity/oauth.js";
 import { fetchAvailableModels, retrieveUserQuotaSummary } from "../antigravity/quota.js";
@@ -111,16 +111,14 @@ export class AccountService {
     const accessToken = fresh.accessToken ?? "";
     const projectId = fresh.projectId ?? "";
 
-    const modelIds = await fetchAvailableModels({
+    const entries = await fetchAvailableModels({
       accessToken,
       projectId,
       env: this.deps.env,
       fetchImpl: this.deps.fetchImpl,
     });
     // Empty = failure or empty catalog: does not overwrite what is already usable.
-    if (modelIds.length > 0) {
-      applyDiscoveredModels(Object.fromEntries(modelIds.map((modelId) => [modelId, null])));
-    }
+    if (entries.length > 0) applyCatalog(entries);
 
     const summary = await retrieveUserQuotaSummary({
       accessToken,

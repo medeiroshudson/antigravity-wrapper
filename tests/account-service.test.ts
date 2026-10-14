@@ -163,8 +163,8 @@ describe("refreshQuota", () => {
 
   const CATALOG = {
     models: {
-      "gemini-3.8-flash-low": { quotaInfo: { remainingFraction: 0.5 } },
-      "claude-opus-4-6-thinking": { quotaInfo: { remainingFraction: 0.5 } },
+      "gemini-3.8-flash-low": { displayName: "Gemini 3.8 Flash (Low)", maxTokens: 1_048_576, maxOutputTokens: 65_536, supportsThinking: true, thinkingBudget: 1000 },
+      "claude-opus-4-6-thinking": { displayName: "Claude Opus 4.6 (Thinking)", maxTokens: 250_000, maxOutputTokens: 64_000, supportsThinking: true, thinkingBudget: 1024 },
     },
   };
 
@@ -288,10 +288,9 @@ describe("refreshQuota", () => {
     seed();
     await new AccountService({ store, env: ENV, fetchImpl: upstream() }).refreshQuota("a1");
     const ids = getPublicModels().map((model) => model.id);
-    // The catalog keeps coming from fetchAvailableModels: it is the only source of
-    // model ids (spec §6). The runtime id is normalized to its canonical public id.
+    // The catalog keeps coming from fetchAvailableModels: it is the only source of model
+    // ids (spec §6). The public id is the runtime id without its effort suffix.
     expect(ids).toContain("claude-opus-4-6");
-    // The static table remains: discovery is additive.
     expect(ids).toContain("gemini-3.8-flash");
   });
 

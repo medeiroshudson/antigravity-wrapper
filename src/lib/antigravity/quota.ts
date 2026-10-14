@@ -1,8 +1,19 @@
 import { endpointCandidates, getUpstreamTimeoutMs, getUserAgent, redact } from "../../config/index.js";
+import type { CatalogEntry } from "../../config/models.js";
 import type { QuotaBucket } from "../accounts/store.js";
 
 interface ModelsPayload {
-  models?: Record<string, { isInternal?: unknown }>;
+  models?: Record<
+    string,
+    {
+      isInternal?: unknown;
+      displayName?: unknown;
+      maxTokens?: unknown;
+      maxOutputTokens?: unknown;
+      supportsThinking?: unknown;
+      thinkingBudget?: unknown;
+    }
+  >;
 }
 
 interface SummaryPayload {
@@ -146,19 +157,18 @@ export async function retrieveUserQuotaSummary(input: {
 }
 
 /**
- * Reads the model catalog and returns the usable runtime model ids.
+ * Reads the model catalog: the ids the account can serve, with the backend's own metadata.
  *
- * It no longer reports quota: its per-model `quotaInfo` reproduced a single window once
- * per model and never surfaced the weekly one (spec §3.3). Quota now comes from
- * `retrieveUserQuotaSummary`. Best-effort: a failure returns `[]`, so the caller keeps
- * whatever catalog it already had.
+ * Every optional field becomes `null` when the backend omits it, and is never guessed: the
+ * registry owns the fallbacks, and inventing a number here would hide a catalog change.
+ * Best-effort — a failure returns `[]`, so the caller keeps whatever catalog it had.
  */
 export async function fetchAvailableModels(input: {
   accessToken: string;
   projectId: string;
   env?: NodeJS.ProcessEnv;
   fetchImpl?: typeof fetch;
-}): Promise<string[]> {
+}): Promise<CatalogEntry[]> {
   const fetchImpl = input.fetchImpl ?? fetch;
   const headers = antigravityHeaders(input.accessToken, input.env);
 
@@ -173,13 +183,20 @@ export async function fetchAvailableModels(input: {
       if (!response.ok) continue;
 
       const data = (await response.json()) as ModelsPayload;
-      const ids: string[] = [];
+      const entries: CatalogEntry[] = [];
       for (const [modelId, info] of Object.entries(data.models ?? {})) {
         if (!info || info.isInternal) continue;
         if (/^(chat_|tab_)/i.test(modelId)) continue;
-        ids.push(modelId);
+        entries.push({
+          id: modelId,
+          displayName: typeof info.displayName === "string" ? info.displayName : null,
+          maxTokens: typeof info.maxTokens === "number" ? info.maxTokens : null,
+          maxOutputTokens: typeof info.maxOutputTokens === "number" ? info.maxOutputTokens : null,
+          supportsThinking: info.supportsThinking === true,
+          thinkingBudget: typeof info.thinkingBudget === "number" ? info.thinkingBudget : null,
+        });
       }
-      return ids;
+      return entries;
     } catch {
       // Failure swallowed on purpose: the catalog read is best-effort and an account
       // without a fresh catalog must stay eligible (spec §8).

@@ -308,7 +308,15 @@ describe("thoughtSignature on the OpenAI surface", () => {
 
 describe("discovered catalog", () => {
   it("makes a discovered model selectable and visible in /v1/models after the refresh", async () => {
-    const catalog = { models: { "claude-opus-4-6": { quotaInfo: { remainingFraction: 1 } } } };
+    // A runtime id, as the catalog really reports it: the Opus exists only in its
+    // thinking form. The old fixture passed the public id here, which is the id the
+    // backend answers 404 to.
+    const catalog = {
+      models: {
+        "claude-opus-4-6-thinking": { displayName: "Claude Opus 4.6 (Thinking)", maxTokens: 250_000, maxOutputTokens: 64_000, supportsThinking: true, thinkingBudget: 1024, quotaInfo: { remainingFraction: 1 } },
+        "gemini-3.8-flash-low": { displayName: "Gemini 3.8 Flash (Low)", maxTokens: 1_048_576, maxOutputTokens: 65_536, supportsThinking: true, thinkingBudget: 1000, quotaInfo: { remainingFraction: 1 } },
+      },
+    };
     const fetchImpl = vi.fn(async (url: string | URL) => {
       const href = String(url);
       if (href.includes("fetchAvailableModels")) return new Response(JSON.stringify(catalog));
@@ -331,10 +339,13 @@ describe("discovered catalog", () => {
 
     const models = await app.inject({ method: "GET", url: "/v1/models", headers: auth });
     const ids = (models.json().data as Array<{ id: string }>).map((m) => m.id);
+    // The public ids are derived from the runtime ones: the suffix becomes a variant.
     expect(ids).toContain("claude-opus-4-6");
     expect(ids).toContain("gemini-3.8-flash");
+    expect(ids).not.toContain("gemini-3.8-flash-low");
 
-    // Before the refresh, a public Claude id would 404; now the route accepts it.
+    // Before the refresh the public id would 404; now the route accepts it and resolves
+    // it to the runtime id that actually exists.
     const chat = await app.inject({
       method: "POST",
       url: "/v1/chat/completions",

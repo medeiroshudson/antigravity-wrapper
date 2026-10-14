@@ -261,29 +261,68 @@ describe("retrieveUserQuotaSummary", () => {
 });
 
 describe("fetchAvailableModels", () => {
-  it("returns the usable model ids and reads no quota", async () => {
+  it("returns one record per usable model, with the catalog's own metadata", async () => {
     const fetchImpl = respond({
       models: {
         "gemini-3.8-flash-low": {
+          displayName: "Gemini 3.8 Flash (Low)",
+          maxTokens: 1_048_576,
+          maxOutputTokens: 65_536,
+          supportsThinking: true,
+          thinkingBudget: 1000,
           quotaInfo: { remainingFraction: 0.8, resetTime: "2026-10-19T20:39:33Z" },
         },
         chat_1: { quotaInfo: { remainingFraction: 1 } },
         "gemini-3.8-flash-high": { isInternal: true, quotaInfo: { remainingFraction: 1 } },
-        "claude-opus-4-6-thinking": { quotaInfo: { remainingFraction: 0.97 } },
+        "claude-opus-4-6-thinking": { displayName: "Claude Opus 4.6 (Thinking)", maxTokens: 250_000, maxOutputTokens: 64_000, supportsThinking: true, thinkingBudget: 1024 },
       },
     });
 
-    const ids = await fetchAvailableModels({ accessToken: "t", projectId: "p", env: ENV, fetchImpl });
+    const entries = await fetchAvailableModels({ accessToken: "t", projectId: "p", env: ENV, fetchImpl });
 
-    // The per-model quota is gone on purpose: it reproduced one window per model and
-    // hid the weekly one (spec §3.3).
-    expect(ids).toEqual(["gemini-3.8-flash-low", "claude-opus-4-6-thinking"]);
+    // The internal and chat_ entries are dropped; the rest carry what the registry needs.
+    expect(entries.map((entry) => entry.id)).toEqual(["gemini-3.8-flash-low", "claude-opus-4-6-thinking"]);
+    expect(entries[0]).toEqual({
+      id: "gemini-3.8-flash-low",
+      displayName: "Gemini 3.8 Flash (Low)",
+      maxTokens: 1_048_576,
+      maxOutputTokens: 65_536,
+      supportsThinking: true,
+      thinkingBudget: 1000,
+    });
+  });
+
+  it("reports a missing field as null rather than guessing", async () => {
+    const fetchImpl = respond({ models: { "gemini-3.8-flash-low": {} } });
+    const entries = await fetchAvailableModels({ accessToken: "t", projectId: "p", env: ENV, fetchImpl });
+
+    // Nothing is inferred: a field the backend omits becomes null, and the registry
+    // decides the fallback. Inventing a number here would hide a catalog change.
+    expect(entries[0]).toEqual({
+      id: "gemini-3.8-flash-low",
+      displayName: null,
+      maxTokens: null,
+      maxOutputTokens: null,
+      supportsThinking: false,
+      thinkingBudget: null,
+    });
+  });
+
+  it("reads supportsThinking only from a boolean true", async () => {
+    const fetchImpl = respond({
+      models: {
+        "gemini-a-low": { supportsThinking: "yes" },
+        "gemini-b-low": { supportsThinking: true },
+      },
+    });
+    const entries = await fetchAvailableModels({ accessToken: "t", projectId: "p", env: ENV, fetchImpl });
+    const byId = new Map(entries.map((entry) => [entry.id, entry]));
+    expect(byId.get("gemini-a-low")?.supportsThinking).toBe(false);
+    expect(byId.get("gemini-b-low")?.supportsThinking).toBe(true);
   });
 
   it("returns empty when the endpoint fails, without throwing", async () => {
     const fetchImpl = vi.fn(async () => new Response("{}", { status: 500 })) as unknown as typeof fetch;
-    expect(await fetchAvailableModels({ accessToken: "t", projectId: "p", env: {}, fetchImpl })).toEqual(
-      [],
-    );
+    expect(await fetchAvailableModels({ accessToken: "t", projectId: "p", env: {}, fetchImpl })).toEqual([]);
   });
 });
