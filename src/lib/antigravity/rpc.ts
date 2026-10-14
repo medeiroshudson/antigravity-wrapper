@@ -5,7 +5,7 @@ import {
   getUserAgent,
 } from "../../config/index.js";
 import { t } from "../../i18n/index.js";
-import { classifyUpstream, UpstreamError } from "./errors.js";
+import { classifyUpstream, isDefinitive, UpstreamError } from "./errors.js";
 
 export function antigravityHeaders(
   token: string,
@@ -36,7 +36,7 @@ export async function streamGenerate(
   const fetchImpl = deps.fetchImpl ?? fetch;
   const body = JSON.stringify(envelope);
   const headerMs = getStreamHeaderTimeoutMs(deps.env);
-  let last: UpstreamError | null = null;
+  let first: UpstreamError | null = null;
 
   for (const endpoint of endpointCandidates(deps.env)) {
     // Deadline up to the headers, combined with the caller signal (AbortSignal.any).
@@ -72,11 +72,16 @@ export async function streamGenerate(
 
     const text = await response.text();
     const error = classifyUpstream(response.status, text);
-    last = error;
-    if (!RETRYABLE_STATUS.has(response.status)) throw error;
+    // The endpoint list is ordered by priority, so the first answer is the authority and a
+    // later one only speaks when nothing higher did. Keeping the last error instead let a
+    // reserve's 429 overwrite the primary's 404, reporting a missing model as a rate limit
+    // (spec §6.1).
+    if (first === null) first = error;
+    // A definitive failure is not repaired by another channel: stop and report it.
+    if (isDefinitive(error.kind) || !RETRYABLE_STATUS.has(response.status)) break;
   }
 
-  throw last ?? new UpstreamError("server_error", 0, t("upstream.noEndpoint"));
+  throw first ?? new UpstreamError("server_error", 0, t("upstream.noEndpoint"));
 }
 
 export interface UsageMetadata {

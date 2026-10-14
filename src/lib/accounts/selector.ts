@@ -1,21 +1,47 @@
 import type { AccountSnapshot } from "./store.js";
 
+/**
+ * The bucket-id prefix of the group a runtime model belongs to (spec §8): the backend
+ * splits quota into "Gemini Models" (`gemini-*`) and "Claude and GPT models" (`3p-*`).
+ * Returns `null` for a family with no known group, which scores as unknown quota.
+ */
+function groupPrefix(runtimeModel: string): string | null {
+  if (/^gemini-/i.test(runtimeModel)) return "gemini";
+  // `gpt-` and not `gpt-oss-`: the backend's own group is "Claude and GPT models", so the
+  // whole OpenAI family belongs to `3p-*`. A narrower match would rank a future GPT model
+  // as unknown quota.
+  if (/^(claude-|gpt-)/i.test(runtimeModel)) return "3p";
+  return null;
+}
+
+/**
+ * Scores an account for a requested model: the lowest remaining fraction across the
+ * requested model's group. `null` means unknown — a model whose family has no group, or
+ * a group with no buckets, which is what a free-tier account reports (spec §3.5).
+ *
+ * Unknown is deliberately not 0 (which would exclude the account) nor 1 (which would
+ * always prefer it).
+ */
 export function summarizeQuota(account: AccountSnapshot, runtimeModel: string): number | null {
-  const relevant = account.quota.filter((row) => row.modelId === runtimeModel);
+  const prefix = groupPrefix(runtimeModel);
+  if (prefix === null) return null;
+  const bucketPrefix = `${prefix}-`;
+  const relevant = account.quota.filter((row) => row.bucketId.startsWith(bucketPrefix));
   if (relevant.length === 0) return null;
-  return relevant.reduce((min, row) => Math.min(min, row.remainingFraction), 1);
+  return relevant.reduce((lowest, row) => Math.min(lowest, row.remainingFraction), 1);
 }
 
 /**
  * Orders the candidates for a request. Pure function: no network, no SQLite.
  *
- * Rules (spec §9.2):
+ * Rules (spec §8):
  *  1. only enabled, non-invalid accounts; an expired cooldown becomes valid again
  *     — a cooldown without `cooldownUntil` is treated as already over (eligible),
  *       since discarding it would silently and permanently lose the account
  *  2. explicit priority comes before quota
  *  3. known quota before unknown quota — unknown is NEUTRAL,
- *     neither zero (would exclude a new account) nor full (would always be preferred)
+ *     neither zero (would exclude a new account) nor full (would always be preferred);
+ *     an account with no group summary lands here, still eligible
  *  4. within the group, decreasing quota and, on a tie, older use
  */
 export function order(

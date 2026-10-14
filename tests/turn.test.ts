@@ -15,6 +15,9 @@ function snapshot(id: string): AccountSnapshot {
     status: "active",
     cooldownUntil: null,
     lastError: null,
+    quotaSummaryError: null,
+    paidTierId: null,
+    paidTierName: null,
     enabled: true,
     priority: 0,
     createdAt: 0,
@@ -127,6 +130,75 @@ describe("TurnRunner", () => {
     const runner = new TurnRunner({ accounts, fetchImpl });
     await expect(runner.run(BASE)).rejects.toMatchObject({ kind: "client_error" });
     expect(accounts.applyFailure).not.toHaveBeenCalled();
+  });
+
+  it("does not fail over on a definitive error: it reports it as itself", async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response('{"error":{"message":"Requested entity was not found."}}', { status: 404 }),
+    ) as unknown as typeof fetch;
+    const accounts = service([snapshot("a1"), snapshot("a2"), snapshot("a3")]);
+    const runner = new TurnRunner({ accounts, fetchImpl });
+
+    const error = await runner.run(BASE).catch((e) => e);
+
+    // A model the backend does not have fails identically on every account, so iterating
+    // the pool could never have succeeded. The cause must survive instead of being
+    // aggregated into an AllAccountsFailedError (spec §6.2).
+    expect(error.kind).toBe("model_not_found");
+    expect(error.name).not.toBe("AllAccountsFailedError");
+    expect(accounts.applyFailure).not.toHaveBeenCalled();
+  });
+
+  it("fails over on a 404, since each account has its own catalog", async () => {
+    // A 404 is authoritative for an ENDPOINT (one backend) but not for an ACCOUNT: the
+    // registry is the union of the accounts' catalogs, so a model can be advertised and
+    // present on a2 while a1 lacks it. Routing on the bearer makes the first account 404
+    // on every endpoint and lets the second serve the request.
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+      const auth = String((init?.headers as Record<string, string> | undefined)?.Authorization ?? "");
+      return auth.includes("tok-a1")
+        ? new Response('{"error":{"message":"Requested entity was not found."}}', { status: 404 })
+        : sse(TEXT_SSE);
+    }) as unknown as typeof fetch;
+    const accounts = service([snapshot("a1"), snapshot("a2")]);
+    const runner = new TurnRunner({ accounts, fetchImpl });
+
+    const { accountId, result } = await runner.run(BASE);
+
+    expect(accountId).toBe("a2");
+    expect(result.content).toBe("ola");
+    // A definitive error changes no account's state, so it earns no applyFailure either.
+    expect(accounts.applyFailure).not.toHaveBeenCalled();
+  });
+
+  it("throws the definitive error itself when every account answers 404", async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response('{"error":{"message":"Requested entity was not found."}}', { status: 404 }),
+    ) as unknown as typeof fetch;
+    const accounts = service([snapshot("a1"), snapshot("a2")]);
+    const runner = new TurnRunner({ accounts, fetchImpl });
+
+    const error = await runner.run(BASE).catch((e) => e);
+
+    // Every account agrees, so the model is genuinely absent: the caller gets one clean
+    // 404 that names the model, never a pool failure (spec D10).
+    expect(error.kind).toBe("model_not_found");
+    expect(error).not.toBeInstanceOf(AllAccountsFailedError);
+    expect(accounts.applyFailure).not.toHaveBeenCalled();
+  });
+
+  it("still fails over to the next account on a throttled one", async () => {
+    const fetchImpl = vi.fn(async () =>
+      new Response('{"error":{"message":"Resource has been exhausted (e.g. check quota)."}}', { status: 429 }),
+    ) as unknown as typeof fetch;
+    const accounts = service([snapshot("a1"), snapshot("a2")]);
+    const runner = new TurnRunner({ accounts, fetchImpl });
+
+    await runner.run(BASE).catch(() => undefined);
+
+    // The account-level failure keeps its failover: this one is repairable by another
+    // account, unlike a missing model.
+    expect(accounts.applyFailure).toHaveBeenCalled();
   });
 
   it("throws AllAccountsFailedError with each account's reason", async () => {

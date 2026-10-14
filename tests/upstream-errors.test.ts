@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyUpstream } from "../src/lib/antigravity/errors.js";
+import { classifyUpstream, isDefinitive } from "../src/lib/antigravity/errors.js";
 
 describe("classifyUpstream", () => {
   it("treats a 429 with a reset hint as a quota wall, extracting retryAfterMs", () => {
@@ -58,5 +58,24 @@ describe("classifyUpstream", () => {
   it("does not leak the token in the message", () => {
     const err = classifyUpstream(401, '{"error":{"message":"bad token ya29.SYNTHETICVALUE000"}}');
     expect(err.message).not.toContain("ya29.SYNTHETIC");
+  });
+});
+
+describe("isDefinitive", () => {
+  it("calls the request-level failures definitive", () => {
+    // No other endpoint or account can repair these: the request itself is wrong.
+    expect(isDefinitive("model_not_found")).toBe(true);
+    expect(isDefinitive("client_error")).toBe(true);
+    expect(isDefinitive("license")).toBe(true);
+  });
+
+  it("leaves the account-level failures repairable by another account", () => {
+    // Each account has its own token and its own verification state, so failing over is
+    // a real remedy and must keep working.
+    expect(isDefinitive("auth")).toBe(false);
+    expect(isDefinitive("validation_required")).toBe(false);
+    expect(isDefinitive("quota")).toBe(false);
+    expect(isDefinitive("transient_rate_limit")).toBe(false);
+    expect(isDefinitive("server_error")).toBe(false);
   });
 });

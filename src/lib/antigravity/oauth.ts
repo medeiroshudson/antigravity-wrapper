@@ -144,10 +144,34 @@ function extractProjectId(data: unknown): string | undefined {
   return undefined;
 }
 
-export async function discoverProjectId(
+export interface CodeAssistInfo {
+  projectId: string | null;
+  paidTierId: string | null;
+  paidTierName: string | null;
+}
+
+function tierField(data: Record<string, unknown>, field: string): string | null {
+  const paid = data.paidTier as Record<string, unknown> | undefined;
+  const value = paid?.[field];
+  return typeof value === "string" ? value : null;
+}
+
+/**
+ * Reads `loadCodeAssist`: the project id and the account's tier (spec §6.1).
+ *
+ * Best-effort and total: every field is `null` when the backend omits it, and the
+ * result is `null` only when no endpoint answered. The refresh cycle reads the tier
+ * with this and must never fail over it, while login needs a project or it must fail —
+ * hence two callers with different policies over one RPC implementation.
+ *
+ * The tier's **id** is what identifies it (`g1-pro-tier`, `free-tier`); the name is
+ * backend copy. `currentTier` is not consulted: it reports `free-tier` even for a paid
+ * account (spec §3.6).
+ */
+export async function loadCodeAssistInfo(
   accessToken: string,
   deps: { env?: NodeJS.ProcessEnv; fetchImpl?: typeof fetch } = {},
-): Promise<{ projectId: string; paidTier: string | null }> {
+): Promise<CodeAssistInfo | null> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const headers = {
     Authorization: `Bearer ${accessToken}`,
@@ -155,7 +179,6 @@ export async function discoverProjectId(
     "User-Agent": getUserAgent(deps.env),
   };
 
-  let lastError = t("upstream.noEndpoint");
   for (const endpoint of endpointCandidates(deps.env)) {
     try {
       const response = await fetchImpl(`${endpoint}/v1internal:loadCodeAssist`, {
@@ -164,23 +187,32 @@ export async function discoverProjectId(
         body: JSON.stringify({ metadata: { ideType: "ANTIGRAVITY" } }),
         signal: AbortSignal.timeout(getUpstreamTimeoutMs(deps.env)),
       });
-      if (!response.ok) {
-        lastError = t("oauth.loadCodeAssistFailed", { status: response.status });
-        continue;
-      }
+      if (!response.ok) continue;
+
       const data = (await response.json()) as Record<string, unknown>;
-      const projectId = extractProjectId(data);
-      if (!projectId) {
-        lastError = t("oauth.loadCodeAssistNoProject");
-        continue;
-      }
-      const paid = data.paidTier as { name?: unknown } | undefined;
-      return { projectId, paidTier: typeof paid?.name === "string" ? paid.name : null };
-    } catch (error) {
-      lastError = redact(error instanceof Error ? error.message : String(error));
+      return {
+        projectId: extractProjectId(data) ?? null,
+        paidTierId: tierField(data, "id"),
+        paidTierName: tierField(data, "name"),
+      };
+    } catch {
+      // Transport failure: try the next endpoint. This reader never throws.
     }
   }
-  throw new Error(t("oauth.projectIdDiscoveryFailed", { detail: lastError }));
+  return null;
+}
+
+export async function discoverProjectId(
+  accessToken: string,
+  deps: { env?: NodeJS.ProcessEnv; fetchImpl?: typeof fetch } = {},
+): Promise<{ projectId: string; paidTier: string | null; paidTierId: string | null }> {
+  const info = await loadCodeAssistInfo(accessToken, deps);
+  if (!info) throw new Error(t("oauth.projectIdDiscoveryFailed", { detail: t("upstream.noEndpoint") }));
+  if (!info.projectId) {
+    throw new Error(t("oauth.loadCodeAssistNoProject"));
+  }
+  // `paidTier` stays the name for this release's login response; `paidTierId` is new.
+  return { projectId: info.projectId, paidTier: info.paidTierName, paidTierId: info.paidTierId };
 }
 
 /**

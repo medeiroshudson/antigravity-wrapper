@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildServer } from "../src/server.js";
 import { AccountStore } from "../src/lib/accounts/store.js";
-import { resetDiscoveredModelsForTests } from "../src/config/models.js";
+import { applyCatalog, resetRegistryForTests } from "../src/config/models.js";
+import { CATALOG } from "./fixtures/catalog.js";
 
 const auth = { authorization: "Bearer test-key" };
 const ENV = { ANTIGRAVITY_CLIENT_ID: "c", ANTIGRAVITY_CLIENT_SECRET: "s" };
@@ -75,13 +76,17 @@ const WEATHER_TOOL = {
 
 beforeEach(() => {
   store = new AccountStore(":memory:");
+  // The registry no longer has a static fallback list, so the route's model guard rejects
+  // every id until a catalog is applied. This is the catalog for the whole file; the tests
+  // that need a different one apply it themselves.
+  applyCatalog(CATALOG);
   seed();
 });
 
 afterEach(async () => {
   await app.close();
   store.close();
-  resetDiscoveredModelsForTests();
+  resetRegistryForTests();
 });
 
 describe("POST /v1/chat/completions", () => {
@@ -308,7 +313,14 @@ describe("thoughtSignature on the OpenAI surface", () => {
 
 describe("discovered catalog", () => {
   it("makes a discovered model selectable and visible in /v1/models after the refresh", async () => {
-    const catalog = { models: { "claude-opus-4-6": { quotaInfo: { remainingFraction: 1 } } } };
+    // An id the file-level CATALOG does not contain, so the assertions below pass only if
+    // the refresh really fed the registry: with an id that beforeEach already supplies,
+    // this test would keep passing after `applyCatalog` was removed from `refreshQuota`.
+    const catalog = {
+      models: {
+        "gemini-3.6-flash-low": { displayName: "Gemini 3.6 Flash (Low)", maxTokens: 1_048_576, maxOutputTokens: 65_536, supportsThinking: true, thinkingBudget: 1000, quotaInfo: { remainingFraction: 1 } },
+      },
+    };
     const fetchImpl = vi.fn(async (url: string | URL) => {
       const href = String(url);
       if (href.includes("fetchAvailableModels")) return new Response(JSON.stringify(catalog));
@@ -331,15 +343,20 @@ describe("discovered catalog", () => {
 
     const models = await app.inject({ method: "GET", url: "/v1/models", headers: auth });
     const ids = (models.json().data as Array<{ id: string }>).map((m) => m.id);
-    expect(ids).toContain("claude-opus-4-6");
+    // Introduced by the refresh alone.
+    expect(ids).toContain("gemini-3.6-flash");
+    // Still present from the file-level catalog: the registry accumulates rather than replaces.
     expect(ids).toContain("gemini-3.8-flash");
+    // The runtime id is never advertised; only its public form.
+    expect(ids).not.toContain("gemini-3.6-flash-low");
 
-    // Before the refresh, a public Claude id would 404; now the route accepts it.
+    // Before the refresh the public id would 404; now the route accepts it and resolves
+    // it to the runtime id that actually exists.
     const chat = await app.inject({
       method: "POST",
       url: "/v1/chat/completions",
       headers: auth,
-      payload: { model: "claude-opus-4-6", messages: [{ role: "user", content: "oi" }] },
+      payload: { model: "gemini-3.6-flash", messages: [{ role: "user", content: "oi" }] },
     });
     expect(chat.statusCode).toBe(200);
   });
@@ -390,5 +407,107 @@ describe("POST /v1/chat/completions over real HTTP", () => {
     expect(response.status).toBe(200);
     const body = (await response.json()) as { choices: Array<{ message: { content: string } }> };
     expect(body.choices[0]?.message.content).toBe("ola");
+  });
+});
+
+describe("the OpenAI surface keeps the OpenAI date contract", () => {
+  it("reports `created` as Unix seconds, not as ISO", async () => {
+    app = buildServer("test-key", { store, env: ENV, fetchImpl: fetchOk(), logger: false });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: {
+        model: "gemini-3.8-flash",
+        stream: false,
+        messages: [{ role: "user", content: "hi" }],
+      },
+    });
+    const body = response.json() as { created?: unknown };
+
+    // Spec D16: the native surface is ISO 8601 UTC, but this one follows the OpenAI
+    // contract — clients compute `new Date(created * 1000)`, and a string here makes
+    // that `Invalid Date`. The two formats are different contracts, not an oversight.
+    expect(typeof body.created).toBe("number");
+    expect(String(body.created)).not.toContain("-");
+    const seconds = body.created as number;
+    // A Unix timestamp in seconds for a plausible present-day instant: ten digits,
+    // not the thirteen an ISO conversion or a milliseconds value would have.
+    expect(seconds).toBeGreaterThan(1_700_000_000);
+    expect(seconds).toBeLessThan(4_000_000_000);
+  });
+
+  it("reports `created` as Unix seconds on the streaming chunks too", async () => {
+    app = buildServer("test-key", { store, env: ENV, fetchImpl: fetchOk(), logger: false });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: {
+        model: "gemini-3.8-flash",
+        stream: true,
+        messages: [{ role: "user", content: "hi" }],
+      },
+    });
+    // The streaming branch computes `created` on its own (`src/routes/chat.ts`),
+    // separately from the non-stream body, so it needs the same pin: a `toIsoUtc`
+    // applied only here would slip past the non-stream test and still break every
+    // client that computes `new Date(created * 1000)`.
+    const frame = response.body.split("\n\n").find((line) => line.startsWith("data: {"));
+    const chunk = JSON.parse(frame!.slice("data: ".length)) as { created?: unknown };
+
+    expect(typeof chunk.created).toBe("number");
+    expect(String(chunk.created)).not.toContain("-");
+    const seconds = chunk.created as number;
+    expect(seconds).toBeGreaterThan(1_700_000_000);
+    expect(seconds).toBeLessThan(4_000_000_000);
+  });
+});
+
+describe("a model the upstream rejects", () => {
+  it("names the model and the reason instead of blaming the pool", async () => {
+    // The catalog must be applied, or the route's own guard answers 404 before the
+    // upstream is ever called -- and the assertion below would pass for that reason.
+    applyCatalog(CATALOG);
+    const fetchImpl = vi.fn(
+      async () => new Response('{"error":{"message":"Requested entity was not found."}}', { status: 404 }),
+    ) as unknown as typeof fetch;
+    app = buildServer("test-key", { store, env: ENV, fetchImpl, logger: false });
+    seed();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: { model: "gemini-3.8-flash", stream: false, messages: [{ role: "user", content: "hi" }] },
+    });
+    const body = response.json() as { error: { message: string } };
+
+    // The whole point of the fix: the message is the diagnosis. Before it read
+    // "All accounts failed: ...(transient_rate_limit)", which sent the investigation to
+    // the quota, where nothing was wrong (spec D12).
+    expect(response.statusCode).toBe(404);
+    expect(body.error.message).toContain("gemini-3.8-flash");
+    expect(body.error.message).toContain("Requested entity was not found");
+    expect(body.error.message).not.toContain("All accounts failed");
+  });
+
+  it("still reports a pool-wide throttling as an account failure", async () => {
+    applyCatalog(CATALOG);
+    const fetchImpl = vi.fn(
+      async () => new Response('{"error":{"message":"Quota exceeded. Resets in 1h."}}', { status: 429 }),
+    ) as unknown as typeof fetch;
+    app = buildServer("test-key", { store, env: ENV, fetchImpl, logger: false });
+    seed();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: { model: "gemini-3.8-flash", stream: false, messages: [{ role: "user", content: "hi" }] },
+    });
+
+    // The account-level path is unchanged: a quota wall is still the pool's problem.
+    expect(response.statusCode).toBe(503);
   });
 });

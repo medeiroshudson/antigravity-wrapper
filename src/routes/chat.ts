@@ -4,6 +4,7 @@ import { getPublicModels, normalizeEffort, resolveRuntimeModel } from "../config
 import { t } from "../i18n/index.js";
 import type { AccountStore } from "../lib/accounts/store.js";
 import { AccountService } from "../lib/accounts/service.js";
+import { isDefinitive, UpstreamError } from "../lib/antigravity/errors.js";
 import { AllAccountsFailedError, TurnRunner } from "../lib/chat/turn.js";
 import { toContents, type ChatMessage } from "../lib/chat/compose.js";
 import {
@@ -45,6 +46,24 @@ const bodySchema = {
     },
   },
 } as const;
+
+/**
+ * A definitive upstream failure is about the request, not the pool, so it is reported with
+ * the model named and as a 404. Everything else keeps its existing mapping (spec D12).
+ */
+function mapTurnError(
+  error: unknown,
+  model: string,
+  fallback: number,
+): { status: number; body: { error: unknown } } {
+  if (error instanceof UpstreamError && isDefinitive(error.kind)) {
+    return toOpenAIErrorBody(
+      new Error(t("chat.modelRejected", { model, detail: error.message })),
+      404,
+    ) as { status: number; body: { error: unknown } };
+  }
+  return toOpenAIErrorBody(error, fallback) as { status: number; body: { error: unknown } };
+}
 
 /**
  * Aborts the upstream only on a real disconnect: `writableFinished` distinguishes
@@ -125,7 +144,7 @@ export async function chatRoutes(
         const { result } = await runner.run(turnInput, { signal: disconnect.signal });
         reply.status(200).send(buildCompletion(result, body.model));
       } catch (error) {
-        const mapped = toOpenAIErrorBody(error, error instanceof AllAccountsFailedError ? 503 : 502);
+        const mapped = mapTurnError(error, body.model, error instanceof AllAccountsFailedError ? 503 : 502);
         reply.status(mapped.status).send(mapped.body);
       }
       return;
@@ -175,7 +194,7 @@ export async function chatRoutes(
       writeChunk({}, result.finishReason);
       reply.raw.write(SSE_DONE);
     } catch (error) {
-      const mapped = toOpenAIErrorBody(error, error instanceof AllAccountsFailedError ? 503 : 502);
+      const mapped = mapTurnError(error, body.model, error instanceof AllAccountsFailedError ? 503 : 502);
       if (started) {
         // Headers already on the wire: the error becomes a frame, followed by an
         // explicit [DONE] so the client does not read the silence as a truncated

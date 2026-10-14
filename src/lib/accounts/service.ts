@@ -1,8 +1,8 @@
 import { getCooldownTransientMs } from "../../config/index.js";
-import { applyDiscoveredModels } from "../../config/models.js";
+import { applyCatalog } from "../../config/models.js";
 import { t } from "../../i18n/index.js";
-import { refreshAccessToken } from "../antigravity/oauth.js";
-import { fetchAvailableModels } from "../antigravity/quota.js";
+import { loadCodeAssistInfo, refreshAccessToken } from "../antigravity/oauth.js";
+import { fetchAvailableModels, retrieveUserQuotaSummary } from "../antigravity/quota.js";
 import { UpstreamError } from "../antigravity/errors.js";
 import { order } from "./selector.js";
 import type { Account, AccountSnapshot, AccountStore } from "./store.js";
@@ -94,26 +94,60 @@ export class AccountService {
   }
 
   /**
-   * Reloads the account's quota snapshot from the catalog and feeds the public
-   * model catalog with what was discovered (spec §7).
-   * Best-effort: `fetchAvailableModels` returns `[]` on failure, and in that case
-   * the static table (and the already-discovered catalog) stays intact — a failed
-   * refresh must not erase the usable catalog.
+   * Reloads the account's quota and tier, and feeds the public model catalog (spec §6).
+   *
+   * Three reads with different duties: `fetchAvailableModels` supplies the model ids,
+   * `retrieveUserQuotaSummary` supplies the quota the admin surface displays, and
+   * `loadCodeAssistInfo` supplies the tier that explains whether that quota is readable.
+   * All three are best-effort — a failure must never fail the refresh, must never change
+   * the account's state, and must never cancel the other reads: a `403
+   * SUBSCRIPTION_REQUIRED` is a fact about the summary, not about the account, which
+   * keeps serving requests (spec §3.5, §11).
    */
   async refreshQuota(id: string): Promise<void> {
     const account = this.deps.store.getAccount(id);
     if (!account) return;
     const fresh = await this.ensureFresh(account);
-    const rows = await fetchAvailableModels({
-      accessToken: fresh.accessToken ?? "",
-      projectId: fresh.projectId ?? "",
+    const accessToken = fresh.accessToken ?? "";
+    const projectId = fresh.projectId ?? "";
+
+    const entries = await fetchAvailableModels({
+      accessToken,
+      projectId,
       env: this.deps.env,
       fetchImpl: this.deps.fetchImpl,
     });
-    this.deps.store.saveQuota(rows.map((row) => ({ ...row, accountId: id })));
     // Empty = failure or empty catalog: does not overwrite what is already usable.
-    if (rows.length > 0) {
-      applyDiscoveredModels(Object.fromEntries(rows.map((row) => [row.modelId, null])));
+    if (entries.length > 0) applyCatalog(entries);
+
+    const summary = await retrieveUserQuotaSummary({
+      accessToken,
+      env: this.deps.env,
+      fetchImpl: this.deps.fetchImpl,
+    });
+    // Always replaces: on failure the rows go away, so the response reports no groups
+    // rather than a reading the refresh could not confirm.
+    this.deps.store.replaceQuota(id, summary.rows);
+    this.deps.store.setQuotaSummaryError(
+      id,
+      summary.failure === null
+        ? null
+        : t(
+            summary.failure.reason === "subscription_required"
+              ? "quota.summaryNeedsSubscription"
+              : "quota.summaryUnavailable",
+            { detail: summary.failure.detail },
+          ),
+    );
+
+    const info = await loadCodeAssistInfo(accessToken, {
+      env: this.deps.env,
+      fetchImpl: this.deps.fetchImpl,
+    });
+    // Written only when the read actually happened: a failed tier read leaves the
+    // previous value in place rather than blanking a display (spec §13).
+    if (info) {
+      this.deps.store.setPaidTier(id, { id: info.paidTierId, name: info.paidTierName });
     }
   }
 }

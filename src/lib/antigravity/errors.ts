@@ -23,6 +23,24 @@ export class UpstreamError extends Error {
   }
 }
 
+/**
+ * Kinds no other endpoint or account can repair: the request itself is the problem. A
+ * missing model, a rejected request and a wrong client fingerprint fail identically
+ * everywhere, so retrying them only spends endpoints and buries the cause.
+ *
+ * `auth` and `validation_required` are deliberately absent: each account has its own token
+ * and its own verification state, so another account is a real remedy for those.
+ */
+const DEFINITIVE_KINDS: ReadonlySet<UpstreamFailureKind> = new Set([
+  "model_not_found",
+  "client_error",
+  "license",
+]);
+
+export function isDefinitive(kind: UpstreamFailureKind): boolean {
+  return DEFINITIVE_KINDS.has(kind);
+}
+
 /** "Resets in 2h 30m" / "Resets in 45m" / "Resets in 30s" -> milliseconds. */
 function parseResetHint(body: string): number | null {
   const match = /Resets?\s+in\s+([^.\n]+)/i.exec(body);

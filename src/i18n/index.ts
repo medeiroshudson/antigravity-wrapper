@@ -35,6 +35,11 @@ const enUS = {
     "No eligible account in the pool: register or re-enable one under /admin/accounts.",
   "account.allFailed": "All accounts failed: {failures}",
 
+  // --- quota summary -------------------------------------------------------
+  "quota.summaryNeedsSubscription":
+    "The quota summary requires a paid subscription (403 SUBSCRIPTION_REQUIRED). This account reports no quota groups and is scheduled after accounts whose quota can be measured; it still serves requests normally. Raise its priority to use it first. Upstream said: {detail}",
+  "quota.summaryUnavailable": "Could not read the quota summary: {detail}",
+
   // --- admin login flow ----------------------------------------------------
   "admin.callbackUrlRequired": "callbackUrl is required",
   "admin.callbackUrlInvalid": "callbackUrl is not a valid URL",
@@ -46,6 +51,7 @@ const enUS = {
 
   // --- chat route ----------------------------------------------------------
   "chat.modelNotFound": "Model '{model}' not found",
+  "chat.modelRejected": "Model '{model}' was rejected upstream: {detail}",
   "chat.messagesEmpty": "toContents expects a non-empty list of messages",
   "chat.accountWithoutProjectId": "account has no projectId",
   "chat.streamWithoutFinishReason": "stream ended without finishReason",
