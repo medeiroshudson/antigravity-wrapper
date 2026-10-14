@@ -64,6 +64,14 @@ describe("summarizeQuota", () => {
     expect(summarizeQuota(a, "gpt-oss-120b-medium")).toBe(0.5);
   });
 
+  it("scores a non-oss GPT model by the 3p group, not as unknown", () => {
+    const a = account({ id: "a", quota: [bucket("gemini-weekly", 0.9), bucket("3p-weekly", 0.4)] });
+    // The backend's group is "Claude and GPT models", so the prefix must be `gpt-`, not
+    // `gpt-oss-`. A narrower match would rank a future GPT model as unknown quota and
+    // sort it last even when it is the only account with quota left.
+    expect(summarizeQuota(a, "gpt-5-medium")).toBe(0.4);
+  });
+
   it("returns null when the requested group has no buckets at all", () => {
     const a = account({ id: "a", quota: [bucket("3p-weekly", 0.5)] });
     expect(summarizeQuota(a, "gemini-3.8-flash")).toBeNull();

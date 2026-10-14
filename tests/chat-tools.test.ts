@@ -5,6 +5,7 @@ import {
   normalizeToolCalls,
   toolChoiceMode,
   toolInstruction,
+  usesLegacyEncoding,
 } from "../src/lib/chat/tools.js";
 
 const BODY = {
@@ -177,5 +178,16 @@ describe("normalizeToolCalls", () => {
 
   it("ignores parts without functionCall", () => {
     expect(normalizeToolCalls([{ text: "oi" }])).toEqual([]);
+  });
+});
+
+describe("the tool schema encoding per family", () => {
+  it("gives a non-oss GPT model the legacy encoding, like the rest of the 3p group", () => {
+    // The OpenAI bridge rejects the JSON-Schema keywords the Gemini path accepts, so the
+    // family test must cover the whole family, not just `gpt-oss-`.
+    expect(usesLegacyEncoding("gpt-5-medium")).toBe(true);
+    expect(usesLegacyEncoding("gpt-oss-120b-medium")).toBe(true);
+    expect(usesLegacyEncoding("claude-opus-4-6-thinking")).toBe(true);
+    expect(usesLegacyEncoding("gemini-3.8-flash-high")).toBe(false);
   });
 });

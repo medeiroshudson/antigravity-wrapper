@@ -138,8 +138,11 @@ function dereference(schema: unknown, root: unknown, seen: Set<string> = new Set
   return out;
 }
 
-function isClaudeOrGptOss(runtimeModel: string): boolean {
-  return runtimeModel.startsWith("claude-") || runtimeModel.startsWith("gpt-oss-");
+/** The bridges that want the legacy `parameters` field rather than `parametersJsonSchema`. */
+export function usesLegacyEncoding(runtimeModel: string): boolean {
+  // `gpt-` and not `gpt-oss-`: the OpenAI bridge rejects the JSON-Schema keywords the
+  // Gemini path accepts, and that applies to the whole family.
+  return runtimeModel.startsWith("claude-") || runtimeModel.startsWith("gpt-");
 }
 
 /**
@@ -153,7 +156,7 @@ export function buildFunctionDeclarations(
   runtimeModel: string,
 ): { functionDeclarations: unknown[] } | undefined {
   if (tools.length === 0) return undefined;
-  const legacy = isClaudeOrGptOss(runtimeModel);
+  const legacy = usesLegacyEncoding(runtimeModel);
   const declarations: unknown[] = [];
 
   for (const tool of tools) {

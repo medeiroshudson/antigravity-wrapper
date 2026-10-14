@@ -7,7 +7,10 @@ import type { AccountSnapshot } from "./store.js";
  */
 function groupPrefix(runtimeModel: string): string | null {
   if (/^gemini-/i.test(runtimeModel)) return "gemini";
-  if (/^(claude-|gpt-oss-)/i.test(runtimeModel)) return "3p";
+  // `gpt-` and not `gpt-oss-`: the backend's own group is "Claude and GPT models", so the
+  // whole OpenAI family belongs to `3p-*`. A narrower match would rank a future GPT model
+  // as unknown quota.
+  if (/^(claude-|gpt-)/i.test(runtimeModel)) return "3p";
   return null;
 }
 
