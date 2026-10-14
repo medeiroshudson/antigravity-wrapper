@@ -191,7 +191,9 @@ describe("management", () => {
   });
 
   it("renders the admin dates as ISO and the cooldown as a phrase", async () => {
-    store.setStatus("a1", "cooldown", { cooldownUntil: Date.parse("2026-10-14T03:07:40Z") });
+    // A far-future instant on purpose: `expireCooldowns` nulls a cooldown once it passes,
+    // so a near date would make this assertion fail on its own as the clock advances.
+    store.setStatus("a1", "cooldown", { cooldownUntil: Date.parse("2099-01-01T00:00:00Z") });
 
     const response = await app.inject({
       method: "GET",
@@ -200,7 +202,7 @@ describe("management", () => {
     });
     const account = (response.json() as { accounts: Array<Record<string, unknown>> }).accounts[0] ?? {};
 
-    expect(account.cooldownUntil).toBe("2026-10-14T03:07:40Z");
+    expect(account.cooldownUntil).toBe("2099-01-01T00:00:00Z");
     expect(typeof account.cooldownResetsIn).toBe("string");
     expect(account.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
     expect(account.lastUsedAt).toBeNull();
@@ -298,6 +300,7 @@ describe("management", () => {
       return new Response(JSON.stringify({ email: "x@y.com" }));
     }) as unknown as typeof fetch;
 
+    await app.close();
     app = buildServer("test-key", { store, env: ENV, fetchImpl, logger: false });
 
     const started = await app.inject({
