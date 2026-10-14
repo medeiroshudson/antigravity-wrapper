@@ -168,10 +168,21 @@ describe("resolveRuntimeModel", () => {
 
   it("resolves a two-variant group at both ends", () => {
     applyCatalog(CATALOG);
-    expect(resolveRuntimeModel("gemini-3.5-flash", "low")).toBe("gemini-3.5-flash-extra-low");
+    expect(resolveRuntimeModel("gemini-3.5-flash", "low")).toBe("gemini-3.5-flash-low");
     expect(resolveRuntimeModel("gemini-3.5-flash", "high")).toBe("gemini-3.5-flash-low");
     expect(resolveRuntimeModel("gemini-2.5-flash", "high")).toBe("gemini-2.5-flash-thinking");
     expect(resolveRuntimeModel("gemini-3-flash", "high")).toBe("gemini-3-flash-agent");
+  });
+
+  it("reaches the lowest variant only through off and minimal", () => {
+    applyCatalog(CATALOG);
+    // For a group whose variants sit at degrees 0 and 1, nearest-with-tie-down sends every
+    // effort from `low` up to the degree-1 variant; only "the lowest available" selects
+    // degree 0. Pinning it keeps that from reading as an accident later.
+    expect(resolveRuntimeModel("gemini-3.5-flash", "off")).toBe("gemini-3.5-flash-extra-low");
+    expect(resolveRuntimeModel("gemini-3.5-flash", "minimal")).toBe("gemini-3.5-flash-extra-low");
+    expect(resolveRuntimeModel("gemini-3.5-flash", "medium")).toBe("gemini-3.5-flash-low");
+    expect(resolveRuntimeModel("gemini-3.5-flash", "xhigh")).toBe("gemini-3.5-flash-low");
   });
 
   it("returns the id itself when the registry does not know it", () => {
