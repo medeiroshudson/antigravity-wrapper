@@ -578,13 +578,30 @@ curl -s http://127.0.0.1:3000/v1/models -H "Authorization: Bearer $API_KEY"
 }
 ```
 
-The static table is the conservative fallback; the wrapper also refreshes the catalogs the
-accounts actually advertise, so a model newly enabled for your account becomes selectable
-without a code change. Some ids are only advertised to paid tiers.
+The list is the backend's own catalog, per account and unioned across the pool: a model is
+advertised when any active account reports it, and each id is one the backend can actually
+serve. Nothing is hardcoded, so the list follows the backend without a release -- and a model
+the backend stops offering disappears instead of being advertised and failing.
 
-`reasoning_effort` accepts `off`, `minimal`, `low`, `medium`, `high`, `xhigh`. It maps to
-the backend's own thinking levels; an unknown value falls back to `off` rather than
-failing the request.
+Three fields come from the catalog rather than from us: `context_length` and `max_model_len`
+from the model's input limit, `max_output_tokens` from its output cap. `display_name` is the
+backend's label with its effort suffix removed. **It is a label, not a key**: the backend
+gives several distinct models the same label, so two entries can share a `display_name` while
+`id` stays unique. Key on `id`.
+
+### Choosing how hard a model thinks
+
+A model family exposes variants that differ only in how much reasoning they do -- the same
+`gemini-3.8-flash` exists as `-low`, `-medium` and `-high` upstream. `reasoning_effort`
+selects between them: `off`/`minimal` take the lightest variant the family has, `low`,
+`medium` and `high`/`xhigh` take the nearest to that level. Ties go **down**, so a request is
+never silently promoted to a more expensive variant than you asked for.
+
+A family with a single variant resolves to it at every effort. That is why `claude-opus-4-6`
+works even though the backend only lists it in its thinking form.
+
+`reasoning_effort: "off"` also forces the thinking budget to zero, whatever the model's
+default is.
 
 `max_tokens` is clamped to the ceiling the backend accepts for the resolved model, so
 asking for more than the model allows cannot produce a `400`.
@@ -735,6 +752,11 @@ account, and the failed account's state is updated so the next request skips it.
 does **not** trigger failover — it is the caller's request that is wrong, and another
 account cannot fix it. When every candidate is exhausted the response is `503` carrying
 each account's reason, with no token in the message.
+
+A model the backend does not have is reported as `404` naming that model, not as a pool
+failure: the request itself is wrong, so it is not retried across accounts or endpoints. A
+quota wall keeps its own shape -- `503` with the account list -- because that one really is
+the pool's problem.
 
 ---
 
