@@ -63,6 +63,52 @@ describe("streamGenerate", () => {
   });
 });
 
+describe("error attribution across endpoints", () => {
+  /** Answers each endpoint in order from the given list of responses. */
+  function byEndpoint(responses: Array<{ status: number; body: string }>) {
+    let call = 0;
+    return vi.fn(async () => {
+      const step = responses[Math.min(call, responses.length - 1)];
+      call += 1;
+      return new Response(step?.body ?? "{}", { status: step?.status ?? 500 });
+    }) as unknown as typeof fetch;
+  }
+
+  const notFound = { status: 404, body: '{"error":{"message":"Requested entity was not found."}}' };
+  const exhausted = { status: 429, body: '{"error":{"message":"Quota reached. Resets in 1h."}}' };
+
+  it("reports the primary endpoint's error, not the last one's", async () => {
+    // Measured live: daily returned 404 and cloudcode-pa returned 429, and the 429 won,
+    // which reported a missing model as a rate limit (spec §3.3).
+    const error = await streamGenerate("t", {}, { env: {}, fetchImpl: byEndpoint([notFound, notFound, exhausted]) }).catch((e) => e);
+    expect(error.kind).toBe("model_not_found");
+    expect(error.status).toBe(404);
+  });
+
+  it("stops after the primary's definitive error instead of spending every endpoint", async () => {
+    const fetchImpl = byEndpoint([notFound, notFound, exhausted]);
+    await streamGenerate("t", {}, { env: {}, fetchImpl }).catch(() => undefined);
+    // One request, not three: an id the backend does not have cannot be repaired by
+    // trying another channel.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("still tries the next endpoint when the failure is repairable", async () => {
+    const fetchImpl = byEndpoint([exhausted, notFound]);
+    await streamGenerate("t", {}, { env: {}, fetchImpl }).catch(() => undefined);
+    // A throttle on the primary is worth a reserve.
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the primary's rate limit when a reserve answers 404", async () => {
+    const error = await streamGenerate("t", {}, { env: {}, fetchImpl: byEndpoint([exhausted, notFound]) }).catch((e) => e);
+    // The reverse of the reported case: a reserve's 404 is not more true than the
+    // primary's 429, which is why first-error-wins beats a specificity ranking.
+    expect(error.kind).toBe("quota");
+    expect(error.status).toBe(429);
+  });
+});
+
 describe("streamGenerate timeouts", () => {
   /** A fetch that only settles when the signal aborts: a backend that accepts and never responds. */
   function hangingFetch(): typeof fetch {
