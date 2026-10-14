@@ -463,3 +463,51 @@ describe("the OpenAI surface keeps the OpenAI date contract", () => {
     expect(seconds).toBeLessThan(4_000_000_000);
   });
 });
+
+describe("a model the upstream rejects", () => {
+  it("names the model and the reason instead of blaming the pool", async () => {
+    // The catalog must be applied, or the route's own guard answers 404 before the
+    // upstream is ever called -- and the assertion below would pass for that reason.
+    applyCatalog(CATALOG);
+    const fetchImpl = vi.fn(
+      async () => new Response('{"error":{"message":"Requested entity was not found."}}', { status: 404 }),
+    ) as unknown as typeof fetch;
+    app = buildServer("test-key", { store, env: ENV, fetchImpl, logger: false });
+    seed();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: { model: "gemini-3.8-flash", stream: false, messages: [{ role: "user", content: "hi" }] },
+    });
+    const body = response.json() as { error: { message: string } };
+
+    // The whole point of the fix: the message is the diagnosis. Before it read
+    // "All accounts failed: ...(transient_rate_limit)", which sent the investigation to
+    // the quota, where nothing was wrong (spec D12).
+    expect(response.statusCode).toBe(404);
+    expect(body.error.message).toContain("gemini-3.8-flash");
+    expect(body.error.message).toContain("Requested entity was not found");
+    expect(body.error.message).not.toContain("All accounts failed");
+  });
+
+  it("still reports a pool-wide throttling as an account failure", async () => {
+    applyCatalog(CATALOG);
+    const fetchImpl = vi.fn(
+      async () => new Response('{"error":{"message":"Quota exceeded. Resets in 1h."}}', { status: 429 }),
+    ) as unknown as typeof fetch;
+    app = buildServer("test-key", { store, env: ENV, fetchImpl, logger: false });
+    seed();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: { model: "gemini-3.8-flash", stream: false, messages: [{ role: "user", content: "hi" }] },
+    });
+
+    // The account-level path is unchanged: a quota wall is still the pool's problem.
+    expect(response.statusCode).toBe(503);
+  });
+});

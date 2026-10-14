@@ -51,6 +51,7 @@ const enUS = {
 
   // --- chat route ----------------------------------------------------------
   "chat.modelNotFound": "Model '{model}' not found",
+  "chat.modelRejected": "Model '{model}' was rejected upstream: {detail}",
   "chat.messagesEmpty": "toContents expects a non-empty list of messages",
   "chat.accountWithoutProjectId": "account has no projectId",
   "chat.streamWithoutFinishReason": "stream ended without finishReason",
