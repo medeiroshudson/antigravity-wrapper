@@ -568,6 +568,7 @@ curl -s http://127.0.0.1:3000/v1/models -H "Authorization: Bearer $API_KEY"
   "data": [
     {
       "id": "gemini-3.8-flash",
+      "display_name": "Gemini 3.8 Flash",
       "object": "model",
       "owned_by": "antigravity",
       "context_length": 1048576,
@@ -580,8 +581,9 @@ curl -s http://127.0.0.1:3000/v1/models -H "Authorization: Bearer $API_KEY"
 
 The list is the backend's own catalog, per account and unioned across the pool: a model is
 advertised when any active account reports it, and each id is one the backend can actually
-serve. Nothing is hardcoded, so the list follows the backend without a release — and a model
-the backend stops offering disappears instead of being advertised and failing.
+serve. Nothing is hardcoded, so a model the backend newly offers becomes selectable without a
+release. The registry only ever grows within a run: a model removed from the catalog stays
+advertised until the next restart.
 
 Three fields come from the catalog rather than from us: `context_length` and `max_model_len`
 from the model's input limit, `max_output_tokens` from its output cap. `display_name` is the
@@ -594,14 +596,18 @@ gives several distinct models the same label, so two entries can share a `displa
 A model family exposes variants that differ only in how much reasoning they do — the same
 `gemini-3.8-flash` exists as `-low`, `-medium` and `-high` upstream. `reasoning_effort`
 selects between them: `off`/`minimal` take the lightest variant the family has, `low`,
-`medium` and `high`/`xhigh` take the nearest to that level. Ties go **down**, so a request is
-never silently promoted to a more expensive variant than you asked for.
+`medium` and `high`/`xhigh` take the nearest to that level. Ties go **down**, and where a
+family has nothing at or below the level you asked for, the nearest variant above it is used
+rather than an error.
 
 A family with a single variant resolves to it at every effort. That is why `claude-opus-4-6`
 works even though the backend only lists it in its thinking form.
 
 `reasoning_effort: "off"` also forces the thinking budget to zero, whatever the model's
 default is.
+
+An unrecognised `reasoning_effort` falls back to `off` rather than failing the request, so a
+typo costs you thinking budget rather than an error.
 
 `max_tokens` is clamped to the ceiling the backend accepts for the resolved model, so
 asking for more than the model allows cannot produce a `400`.
