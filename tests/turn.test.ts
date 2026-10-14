@@ -132,6 +132,37 @@ describe("TurnRunner", () => {
     expect(accounts.applyFailure).not.toHaveBeenCalled();
   });
 
+  it("does not fail over on a definitive error: it reports it as itself", async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response('{"error":{"message":"Requested entity was not found."}}', { status: 404 }),
+    ) as unknown as typeof fetch;
+    const accounts = service([snapshot("a1"), snapshot("a2"), snapshot("a3")]);
+    const runner = new TurnRunner({ accounts, fetchImpl });
+
+    const error = await runner.run(BASE).catch((e) => e);
+
+    // A model the backend does not have fails identically on every account, so iterating
+    // the pool could never have succeeded. The cause must survive instead of being
+    // aggregated into an AllAccountsFailedError (spec §6.2).
+    expect(error.kind).toBe("model_not_found");
+    expect(error.name).not.toBe("AllAccountsFailedError");
+    expect(accounts.applyFailure).not.toHaveBeenCalled();
+  });
+
+  it("still fails over to the next account on a throttled one", async () => {
+    const fetchImpl = vi.fn(async () =>
+      new Response('{"error":{"message":"Resource has been exhausted (e.g. check quota)."}}', { status: 429 }),
+    ) as unknown as typeof fetch;
+    const accounts = service([snapshot("a1"), snapshot("a2")]);
+    const runner = new TurnRunner({ accounts, fetchImpl });
+
+    await runner.run(BASE).catch(() => undefined);
+
+    // The account-level failure keeps its failover: this one is repairable by another
+    // account, unlike a missing model.
+    expect(accounts.applyFailure).toHaveBeenCalled();
+  });
+
   it("throws AllAccountsFailedError with each account's reason", async () => {
     const fetchImpl = vi.fn(
       async () => new Response('{"error":{"message":"Quota reached. Resets in 1h."}}', { status: 429 }),

@@ -3,7 +3,7 @@ import { getMaxOutputTokens, getThinkingConfig, type ReasoningEffort } from "../
 import { t } from "../../i18n/index.js";
 import type { AccountService } from "../accounts/service.js";
 import { buildEnvelope, newRequestIdentity, type GeminiContent } from "../antigravity/envelope.js";
-import { UpstreamError } from "../antigravity/errors.js";
+import { isDefinitive, UpstreamError } from "../antigravity/errors.js";
 import { readSse, streamGenerate } from "../antigravity/rpc.js";
 import type { TurnResult } from "../openai-format/index.js";
 import { normalizeToolCalls } from "./tools.js";
@@ -103,9 +103,12 @@ export class TurnRunner {
         } catch (error) {
           if (!(error instanceof UpstreamError)) throw error;
 
-          // A client error is not fixed by switching accounts, and an error that
-          // arrived after the first content can no longer switch accounts: propagate.
-          if (error.kind === "client_error" || fatalAfterContent.has(error)) throw error;
+          // A client error is not fixed by switching accounts, an error that arrived after
+          // the first content can no longer switch accounts, and a definitive failure --
+          // a model the backend does not have, a rejected request, a wrong fingerprint --
+          // fails identically everywhere. All three propagate to the caller as themselves
+          // rather than becoming an account-level failure (spec §6.2).
+          if (isDefinitive(error.kind) || fatalAfterContent.has(error)) throw error;
 
           if (error.kind === "transient_rate_limit" && attempt < TRANSIENT_RETRIES) {
             if (backoffMs > 0) await sleep(backoffMs);
