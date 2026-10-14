@@ -20,6 +20,7 @@ what you can spend is the sum of every account in the pool.
 
 - [Requirements](#requirements)
 - [Quick start](#quick-start)
+- [Running with Docker](#running-with-docker)
 - [Authentication](#authentication)
 - [Obtaining the OAuth client credentials](#obtaining-the-oauth-client-credentials)
 - [Adding accounts](#adding-accounts)
@@ -82,6 +83,81 @@ before you register an account, not a misconfiguration.
 > **`Authorization: Bearer <API_KEY>` is required on every route**, including `/health`
 > and `/admin`. There is no unauthenticated surface, which is why the container's own
 > healthcheck sends the header too.
+
+---
+
+## Running with Docker
+
+A prebuilt image is published to the GitHub Container Registry on every push to `main`,
+for both `amd64` and `arm64`:
+
+```bash
+docker pull ghcr.io/medeiroshudson/antigravity-wrapper:latest
+```
+
+Tags available: `latest`, the branch name (`main`), and `sha-<short>` for an exact commit
+(`docker pull ghcr.io/medeiroshudson/antigravity-wrapper:sha-2b6eea7`). Pin the `sha-` form
+when you want a build that cannot move under you.
+
+### Run it
+
+```bash
+docker run -d --name antigravity-wrapper \
+  -p 3000:3000 \
+  -e API_KEY="$API_KEY" \
+  -e ANTIGRAVITY_CLIENT_ID="$ANTIGRAVITY_CLIENT_ID" \
+  -e ANTIGRAVITY_CLIENT_SECRET="$ANTIGRAVITY_CLIENT_SECRET" \
+  -v antigravity-data:/app/data \
+  ghcr.io/medeiroshudson/antigravity-wrapper:latest
+```
+
+`API_KEY` is what the container needs to **start**: without it the process exits with
+`API_KEY must be configured`. The two `ANTIGRAVITY_*` values are needed to **add an
+account**, not to boot — without them the service runs, `/health` answers `200`, and
+`POST /admin/accounts/start` fails with `500` naming the missing client. Set all three
+unless you have a reason not to.
+
+The compose file in this repository makes all three mandatory up front, which is why
+[Quick start](#quick-start) describes it as refusing to start.
+
+```bash
+curl -s http://127.0.0.1:3000/health -H "Authorization: Bearer $API_KEY"
+# → {"status":"ok"}
+```
+
+### The account database must outlive the container
+
+The pool of Google accounts lives in a SQLite file, and losing it means logging every
+account in again. The `-v antigravity-data:/app/data` above is therefore not optional in
+practice: without a volume, `docker rm` discards the pool.
+
+Inside the container the file is `/app/data/antigravity.db`, owned by the unprivileged
+`node` user the image runs as. Point `DB_PATH` elsewhere and the volume must follow.
+
+### Variables worth setting on the container
+
+The full list, with defaults and semantics, is in [Configuration](#configuration) — this is
+the subset a container deployment normally touches:
+
+| Variable | Container default | Why you would change it |
+|---|---:|---|
+| `API_KEY` | — | Required to start. The ingress credential, sent as `Bearer` |
+| `ANTIGRAVITY_CLIENT_ID` | — | Required to add an account. OAuth client id |
+| `ANTIGRAVITY_CLIENT_SECRET` | — | Required to add an account. OAuth client secret |
+| `PORT` / `HOST` | `3000` / `0.0.0.0` | Bind address; the published port must match `PORT` |
+| `DB_PATH` | `/app/data/antigravity.db` | Move the pool; pair it with a volume at the new path |
+| `APP_LOCALE` | `en-US` | Language of the returned messages |
+| `MAX_FAILOVER_ATTEMPTS` | `3` | Ceiling on accounts tried per request |
+| `QUOTA_REFRESH_TTL_MS` | `300000` | How often the pool's quota is re-read |
+
+Everything else — the timeouts, the cooldowns, the quota TTLs — has a default that suits a
+single-host deployment. Leave them alone until you have a reason.
+
+### Compose instead
+
+`docker-compose.yml` in the repository runs the same service from source, which is what
+[Quick start](#quick-start) uses. It builds the image locally rather than pulling it, so
+reach for it when you are changing the code rather than deploying it.
 
 ---
 
