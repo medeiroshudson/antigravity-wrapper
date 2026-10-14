@@ -2,12 +2,35 @@ import { describe, expect, it } from "vitest";
 import {
   assertSafeBaseUrl,
   endpointCandidates,
+  getLogLevel,
   getMaxFailoverAttempts,
   getUserAgent,
   maskEmail,
   redact,
   resolveApiKey,
 } from "../src/config/index.js";
+
+describe("getLogLevel", () => {
+  it("accepts every level the logger understands", () => {
+    for (const level of ["fatal", "error", "warn", "info", "debug", "trace", "silent"]) {
+      expect(getLogLevel({ LOG_LEVEL: level })).toBe(level);
+    }
+  });
+
+  it("matches case-insensitively, as the locale does", () => {
+    expect(getLogLevel({ LOG_LEVEL: "DEBUG" })).toBe("debug");
+    expect(getLogLevel({ LOG_LEVEL: "  Warn  " })).toBe("warn");
+  });
+
+  it("falls back to info when unset or unrecognised", () => {
+    // A typo must not take the service down: the boot is not the place to discover that
+    // someone wrote `verbose`.
+    expect(getLogLevel({})).toBe("info");
+    expect(getLogLevel({ LOG_LEVEL: "" })).toBe("info");
+    expect(getLogLevel({ LOG_LEVEL: "   " })).toBe("info");
+    expect(getLogLevel({ LOG_LEVEL: "verbose" })).toBe("info");
+  });
+});
 
 describe("resolveApiKey", () => {
   it("fails closed when absent or empty", () => {

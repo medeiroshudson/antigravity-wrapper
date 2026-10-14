@@ -113,6 +113,24 @@ export function getMaxFailoverAttempts(env: NodeJS.ProcessEnv = process.env): nu
   return positiveInt(env.MAX_FAILOVER_ATTEMPTS, 3);
 }
 
+/** The levels the logger understands. `silent` is one of them, so logging can be muted. */
+const LOG_LEVELS = ["fatal", "error", "warn", "info", "debug", "trace", "silent"] as const;
+
+export type LogLevel = (typeof LOG_LEVELS)[number];
+
+/**
+ * The level to log at. An unrecognised value falls back to `info` rather than throwing,
+ * the way an unknown locale does: a typo in an environment variable must not stop the
+ * service from booting, and the fallback is the level this service logged at before the
+ * setting existed.
+ */
+export function getLogLevel(env: NodeJS.ProcessEnv = process.env): LogLevel {
+  const value = env.LOG_LEVEL?.trim().toLowerCase();
+  return (LOG_LEVELS as readonly string[]).includes(value ?? "")
+    ? (value as LogLevel)
+    : "info";
+}
+
 export function getUserAgent(env: NodeJS.ProcessEnv = process.env): string {
   const value = env.ANTIGRAVITY_USER_AGENT?.trim();
   return value && value.length > 0 ? value : DEFAULT_USER_AGENT;

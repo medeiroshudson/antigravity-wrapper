@@ -18,6 +18,30 @@ afterEach(async () => {
   vi.unstubAllEnvs();
 });
 
+describe("logging level", () => {
+  it("takes the level from LOG_LEVEL", async () => {
+    const withDebug = buildServer("test-key", { store, env: { LOG_LEVEL: "debug" } });
+    // Read from pino's own state: this is what proves the server *uses* the setting,
+    // rather than only that `getLogLevel` can parse it.
+    expect(withDebug.log.level).toBe("debug");
+    await withDebug.close();
+  });
+
+  it("defaults to info, the level the previous hardcoded logger already had", async () => {
+    const without = buildServer("test-key", { store });
+    // `logger: true` -- the old value -- meant pino's default, which is info. An unset
+    // LOG_LEVEL must therefore leave the existing output untouched.
+    expect(without.log.level).toBe("info");
+    await without.close();
+  });
+
+  it("reports the level even when a caller silences the logger", async () => {
+    const silenced = buildServer("test-key", { store, logger: false });
+    expect(silenced.log.level).not.toBe("debug");
+    await silenced.close();
+  });
+});
+
 describe("global authentication", () => {
   it("fails closed without API_KEY", () => {
     expect(() => buildServer("", { store })).toThrow("API_KEY must be configured");

@@ -2,7 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import { config as loadEnv } from "dotenv";
 import Fastify from "fastify";
 import type { FastifyInstance, FastifyServerOptions } from "fastify";
-import { getHost, getPort, resolveApiKey } from "./config/index.js";
+import { getHost, getLogLevel, getPort, resolveApiKey } from "./config/index.js";
 import { resolveLocale, setLocale, t } from "./i18n/index.js";
 import type { AccountStore } from "./lib/accounts/store.js";
 import { toOpenAIErrorBody } from "./lib/openai-format/index.js";
@@ -41,7 +41,9 @@ export function buildServer(
     ...(deps.env ?? {}),
     API_KEY: apiKey ?? envKey,
   });
-  const app = Fastify({ logger: deps.logger ?? true });
+  const app = Fastify({
+    logger: deps.logger ?? { level: getLogLevel({ ...process.env, ...(deps.env ?? {}) }) },
+  });
 
   // Bearer required on EVERY route, including /health and /admin.
   app.addHook("onRequest", async (request, reply) => {
