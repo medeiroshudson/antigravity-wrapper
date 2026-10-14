@@ -289,8 +289,8 @@ describe("refreshQuota", () => {
     await new AccountService({ store, env: ENV, fetchImpl: upstream() }).refreshQuota("a1");
     const ids = getPublicModels().map((model) => model.id);
     // The catalog keeps coming from fetchAvailableModels: it is the only source of
-    // model ids (spec §6).
-    expect(ids).toContain("claude-opus-4-6-thinking");
+    // model ids (spec §6). The runtime id is normalized to its canonical public id.
+    expect(ids).toContain("claude-opus-4-6");
     // The static table remains: discovery is additive.
     expect(ids).toContain("gemini-3.8-flash");
   });

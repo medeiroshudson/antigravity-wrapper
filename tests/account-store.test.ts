@@ -163,6 +163,14 @@ describe("AccountStore", () => {
     });
   });
 
+  it("returns the buckets in insertion order, so the backend's order survives storage", () => {
+    add();
+    store.replaceQuota("a1", [bucket({ bucketId: "gemini-weekly" }), bucket({ bucketId: "gemini-5h" })]);
+    // The API promises the backend's order (spec D6). Without an explicit ORDER BY the
+    // primary-key index returns these alphabetically, reporting 5h before weekly.
+    expect(store.getQuota("a1").map((row) => row.bucketId)).toEqual(["gemini-weekly", "gemini-5h"]);
+  });
+
   it("replaces the whole snapshot, so a vanished bucket does not linger", () => {
     add();
     store.replaceQuota("a1", [bucket(), bucket({ bucketId: "gemini-5h", groupName: "Gemini Models" })]);

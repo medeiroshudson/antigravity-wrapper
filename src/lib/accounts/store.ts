@@ -327,9 +327,17 @@ export class AccountStore {
     }
   }
 
+  /**
+   * Reads the account's bucket rows in the order they were inserted, which is the order
+   * the backend reported them (spec D6). The `(account_id, bucket_id)` primary-key index
+   * serves the `account_id` predicate, so without an explicit `ORDER BY` SQLite returns
+   * the rows alphabetically by `bucket_id` and the promised order is lost. `replaceQuota`
+   * deletes and re-inserts the account's rows in backend order, so `rowid` order is
+   * insertion order.
+   */
   getQuota(accountId: string): QuotaBucket[] {
     const rows = this.db
-      .prepare("SELECT * FROM quota_snapshots WHERE account_id = ?")
+      .prepare("SELECT * FROM quota_snapshots WHERE account_id = ? ORDER BY rowid")
       .all(accountId) as unknown as Array<{
       account_id: string;
       bucket_id: string;
