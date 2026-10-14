@@ -268,18 +268,19 @@ not fail the login), and stores everything:
 }
 ```
 
-`paidTier` is the **name** of the tier the backend reports for the account, or `null`
-when it reports no usable name. Presence of the value is not subscription proof: an
-account with no paid subscription reports the tier name **"Antigravity Starter
-Quota"**, so a non-null `paidTier` does not by itself mean a subscription is active.
-The string is backend copy — read it as a label, not as a stable identifier.
+`paidTier` is an object, `{ "id": …, "name": … }`, or `null` when the tier has not been
+read yet. The **`id`** is the stable field to branch on — `g1-pro-tier` for Google AI Pro,
+`free-tier` for an account without a paid subscription — and the **`name`** is display copy
+the backend may reword at any time. Always read the id, never the name.
 
-Such an account still serves requests normally. What it lacks is a **quota summary**,
-which the backend gates behind a subscription: the summary endpoint answers
-`403 SUBSCRIPTION_REQUIRED`, so the account shows no quota groups and is scheduled
-after the accounts whose quota can be measured. It is never disabled for this. To
-place it deliberately, raise its `priority` — that outranks quota in the selection
-order.
+A `free-tier` account is not a broken one. It **serves requests normally**; what it lacks is
+a **quota summary**, which the backend gates behind a subscription. Its summary request
+answers `403 SUBSCRIPTION_REQUIRED`, so it reports no quota groups and is scheduled after the
+accounts whose quota can be measured. It is never disabled for this. To place it
+deliberately, raise its `priority` — that outranks quota in the selection order.
+
+The tier is read at login and re-read on every quota refresh, so it stays current without a
+new login.
 
 The email is always returned **masked**; when it could not be read, `id` is the only
 label.
@@ -341,8 +342,18 @@ curl -s http://127.0.0.1:3000/admin/accounts/account-3f2a91bc77de0d14 \
   -H "Authorization: Bearer $API_KEY"
 ```
 
-Returns `{ "account": { … }, "quota": [ … ] }`, where each quota row is
-`{ accountId, modelId, window, remainingFraction, resetAt, fetchedAt }`.
+Returns `{ "account": { … }, "groups": [ … ] }`, where each group is
+`{ name, description, fetchedAt, buckets }` and each bucket is
+`{ name, bucketId, window, remainingPercent, remainingFraction, resetAt, resetsIn, description }`.
+
+The group view is the backend's own: **Gemini Models** and **Claude and GPT models**, each
+split into a weekly and a five-hour window. Within a group, models share both windows, and
+quota is consumed in proportion to the cost of the tokens — so the same quota lasts longer
+with shorter tasks or a more cost-effective model. The five-hour window smooths out
+aggregate demand so capacity is distributed fairly across all users; the weekly window is
+tied to your tier.
+
+All dates are ISO 8601 in UTC. `resetAt` is the authoritative instant.
 
 ### Park an account without deleting it
 
@@ -387,24 +398,50 @@ curl -s http://127.0.0.1:3000/admin/accounts/quota -H "Authorization: Bearer $AP
 
 ```json
 {
+  "generatedAt": "2026-10-13T20:43:00Z",
   "accounts": [
     {
-      "id": "account-3f2a91bc77de0d14",
-      "email": "h***n@gmail.com",
+      "id": "account-492b954c1a93c92f",
+      "email": "h***c@gmail.com",
       "status": "active",
-      "quota": [
+      "cooldownUntil": null,
+      "cooldownResetsIn": null,
+      "groups": [
         {
-          "modelId": "gemini-3.8-flash-low",
-          "window": "model",
-          "remainingFraction": 0.8,
-          "resetAt": 1760794413000,
-          "fetchedAt": 1760400012345
+          "name": "Gemini Models",
+          "description": "Models within this group: Gemini Flash, Gemini Pro",
+          "fetchedAt": "2026-10-13T20:43:00Z",
+          "buckets": [
+            {
+              "name": "Weekly Limit Remaining",
+              "bucketId": "gemini-weekly",
+              "window": "weekly",
+              "remainingPercent": 99,
+              "remainingFraction": 0.99093425,
+              "resetAt": "2026-10-19T20:43:54Z",
+              "resetsIn": "5d 21h",
+              "description": "You have used some of your weekly limit, it will fully refresh in 5 days, 21 hours."
+            }
+          ]
         }
-      ]
+      ],
+      "quotaSummaryError": null
     }
   ]
 }
 ```
+
+Three things this payload cannot tell you on its own:
+
+- **`resetsIn` is a snapshot, not a fact.** It is true only at the moment of the response;
+  a client that stores the JSON and renders it later shows a stale value. Rely on `resetAt`,
+  and use each group's `fetchedAt` for the age of the reading — `remainingFraction` and the
+  bucket prose are as old as that timestamp.
+- **The bucket and group order is the backend's**, weekly before five-hour and Gemini before
+  Claude and GPT. Render the order you receive rather than assuming one.
+- **`quotaSummaryError` says why there are no groups.** A `403 SUBSCRIPTION_REQUIRED` means
+  the summary needs a paid subscription; the account itself still serves requests and stays
+  in rotation, ordered after the accounts whose quota is measurable.
 
 This is the data the selection order is built from, so it is the view to check when you
 want to confirm the pool is actually being balanced by quota rather than by round-robin.
@@ -412,6 +449,19 @@ A row appears only after a refresh has measured it, so a freshly added account s
 empty `quota` array and is treated as *unknown* by the selector — sorted last, not assumed
 full. Availability, quota groups and reset times are returned by the service and differ
 per account.
+
+### Date formats
+
+One rule, two contracts:
+
+- **The native surface — every `/admin/*` endpoint — returns ISO 8601 in UTC**, with a `Z`
+  offset: `"2026-10-19T20:43:54Z"`. Cooldowns, `createdAt`, `lastUsedAt` and every quota
+  `resetAt` follow it, and each reset also carries `resetsIn` for reading at a glance.
+- **The OpenAI-compatible surface keeps the OpenAI contract.** `created` in
+  `POST /v1/chat/completions`, its streaming chunks and the model objects is a **Unix
+  timestamp in seconds**, because that is what OpenAI specifies and what every OpenAI SDK
+  parses (`new Date(created * 1000)`). It is not an inconsistency to be fixed — changing it
+  would break the compatibility this surface exists to provide.
 
 ### Remove an account
 
@@ -644,13 +694,17 @@ of the pool. Candidates are ordered like this:
 
 1. **Filter** — keep only accounts that are `enabled` and `active` (or `cooldown` with an
    expiry that has already passed).
-2. **Known quota before unknown** — accounts with a measured, healthy quota for the
-   requested model come first; accounts whose quota is **unknown** come last. Unknown quota
-   is deliberately neutral: not zero (which would exclude every newly added account) and
-   not full (which would make a new account always win).
-3. **Descending quota** — within each partition, the highest `remainingFraction` first,
-   with ties broken by whichever account was used longest ago, which spreads load.
-4. **Priority overrides all of it** — an explicit `priority` sorts ahead of the quota tiers.
+2. **Known quota before unknown** — an account whose quota for the requested model's group
+   has been measured comes first; accounts whose quota is **unknown** come last. Unknown
+   quota is neutral: never zero (which would exclude the account) and never full. An account
+   with no quota summary at all — a free-tier account whose summary the backend refuses, or
+   one whose last refresh failed — lands here, still eligible and still serving requests.
+3. **Descending quota** — within each partition, the highest remaining fraction first. The
+   score is the **lowest fraction across the requested model's group windows**: the weekly
+   and five-hour windows are shared by the whole group, and the tightest one is the binding
+   constraint.
+4. **Priority overrides all of it** — an explicit `priority` sorts ahead of both quota tiers.
+   This is how you place an account whose quota cannot be measured.
 
 **Cooldown on a quota wall.** A `429` carrying a wall signal (`Resets in …`, quota
 exceeded) puts the account in `cooldown` until the reset time the backend named.
