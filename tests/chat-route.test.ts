@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildServer } from "../src/server.js";
 import { AccountStore } from "../src/lib/accounts/store.js";
-import { resetRegistryForTests } from "../src/config/models.js";
+import { applyCatalog, resetRegistryForTests } from "../src/config/models.js";
+import { CATALOG } from "./fixtures/catalog.js";
 
 const auth = { authorization: "Bearer test-key" };
 const ENV = { ANTIGRAVITY_CLIENT_ID: "c", ANTIGRAVITY_CLIENT_SECRET: "s" };
@@ -75,6 +76,10 @@ const WEATHER_TOOL = {
 
 beforeEach(() => {
   store = new AccountStore(":memory:");
+  // The registry no longer has a static fallback list, so the route's model guard rejects
+  // every id until a catalog is applied. This is the catalog for the whole file; the tests
+  // that need a different one apply it themselves.
+  applyCatalog(CATALOG);
   seed();
 });
 
