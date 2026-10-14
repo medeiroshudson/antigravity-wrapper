@@ -107,10 +107,11 @@ tests, so the key is one of the project's own configuration values — the same 
 reads at boot. The battery resolves it into an environment variable for its own process, and the
 sandbox config stays value-free via `{env:HARNESS_API_KEY}`. No manual step is needed.
 
-Put this at the top of `run-tests.sh`:
+Put this at the top of `run-tests.sh`, substituting the repository root you are working in
+(`git rev-parse --show-toplevel`):
 
 ```bash
-REPO=/Users/medeiroshudson/Documents/Development/antigravity-wrapper
+REPO=<repo-root>
 export HARNESS_API_KEY=$(sed -n 's/^API_KEY=//p' "$REPO/.env" | tr -d '"' | tr -d "'")
 [ -n "$HARNESS_API_KEY" ] || { echo "BLOCKED: no API_KEY in $REPO/.env"; exit 2; }
 ```
@@ -130,7 +131,7 @@ fallback is one command for the user, and it is worth stating plainly which chec
 unproven:
 
 ```bash
-cd /Users/medeiroshudson/Documents/Development/antigravity-wrapper && bash /tmp/<name>/run-tests.sh
+cd <repo-root> && bash /tmp/<name>/run-tests.sh
 ```
 
 **A 401 is not a service finding.** If the battery runs without a resolved key, every call answers
