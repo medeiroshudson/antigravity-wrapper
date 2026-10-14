@@ -257,14 +257,15 @@ not fail the login), and stores everything:
     "email": "h***n@gmail.com",
     "projectId": "aicode-consumers",
     "status": "active",
+    "paidTier": { "id": "g1-pro-tier", "name": "Google AI Pro" },
     "cooldownUntil": null,
+    "cooldownResetsIn": null,
     "lastError": null,
     "enabled": true,
     "priority": 0,
-    "createdAt": 1760399400000,
+    "createdAt": "2026-10-13T20:43:00Z",
     "lastUsedAt": null
-  },
-  "paidTier": "Google AI Pro"
+  }
 }
 ```
 
@@ -321,12 +322,14 @@ curl -s http://127.0.0.1:3000/admin/accounts -H "Authorization: Bearer $API_KEY"
       "email": "h***n@gmail.com",
       "projectId": "aicode-consumers",
       "status": "active",
+      "paidTier": { "id": "g1-pro-tier", "name": "Google AI Pro" },
       "cooldownUntil": null,
+      "cooldownResetsIn": null,
       "lastError": null,
       "enabled": true,
       "priority": 0,
-      "createdAt": 1760399400000,
-      "lastUsedAt": 1760400012345
+      "createdAt": "2026-10-13T20:43:00Z",
+      "lastUsedAt": "2026-10-13T21:11:52Z"
     }
   ]
 }
@@ -445,10 +448,11 @@ Three things this payload cannot tell you on its own:
 
 This is the data the selection order is built from, so it is the view to check when you
 want to confirm the pool is actually being balanced by quota rather than by round-robin.
-A row appears only after a refresh has measured it, so a freshly added account shows an
-empty `quota` array and is treated as *unknown* by the selector — sorted last, not assumed
-full. Availability, quota groups and reset times are returned by the service and differ
-per account.
+A group appears only after a refresh has measured it, so a freshly added account shows
+`groups: []` — with `quotaSummaryError` set when the backend refuses the summary, as it does
+for a free-tier account — and is treated as *unknown* by the selector: sorted last, not
+assumed full. Availability, quota groups and reset times are returned by the service and
+differ per account.
 
 ### Date formats
 
@@ -702,7 +706,7 @@ of the pool. Candidates are ordered like this:
 3. **Descending quota** — within each partition, the highest remaining fraction first. The
    score is the **lowest fraction across the requested model's group windows**: the weekly
    and five-hour windows are shared by the whole group, and the tightest one is the binding
-   constraint.
+   constraint; ties go to the account used longest ago, which spreads load.
 4. **Priority overrides all of it** — an explicit `priority` sorts ahead of both quota tiers.
    This is how you place an account whose quota cannot be measured.
 
