@@ -401,19 +401,26 @@ curl -s http://127.0.0.1:3000/admin/accounts/quota -H "Authorization: Bearer $AP
 
 ```json
 {
-  "generatedAt": "2026-10-13T20:43:00Z",
+  "generatedAt": "2026-10-13T23:43:54Z",
   "accounts": [
     {
       "id": "account-492b954c1a93c92f",
       "email": "h***c@gmail.com",
+      "projectId": "aicode-consumers",
       "status": "active",
+      "paidTier": { "id": "g1-pro-tier", "name": "Google AI Pro" },
       "cooldownUntil": null,
       "cooldownResetsIn": null,
+      "lastError": null,
+      "enabled": true,
+      "priority": 0,
+      "createdAt": "2026-10-13T20:43:00Z",
+      "lastUsedAt": "2026-10-13T21:11:52Z",
       "groups": [
         {
           "name": "Gemini Models",
           "description": "Models within this group: Gemini Flash, Gemini Pro",
-          "fetchedAt": "2026-10-13T20:43:00Z",
+          "fetchedAt": "2026-10-13T23:43:54Z",
           "buckets": [
             {
               "name": "Weekly Limit Remaining",
@@ -460,12 +467,13 @@ One rule, two contracts:
 
 - **The native surface — every `/admin/*` endpoint — returns ISO 8601 in UTC**, with a `Z`
   offset: `"2026-10-19T20:43:54Z"`. Cooldowns, `createdAt`, `lastUsedAt` and every quota
-  `resetAt` follow it, and each reset also carries `resetsIn` for reading at a glance.
+  `resetAt` follow it, and each carries its time remaining for reading at a glance —
+  `resetsIn` on a quota bucket, `cooldownResetsIn` on a cooldown.
 - **The OpenAI-compatible surface keeps the OpenAI contract.** `created` in
-  `POST /v1/chat/completions`, its streaming chunks and the model objects is a **Unix
-  timestamp in seconds**, because that is what OpenAI specifies and what every OpenAI SDK
-  parses (`new Date(created * 1000)`). It is not an inconsistency to be fixed — changing it
-  would break the compatibility this surface exists to provide.
+  `POST /v1/chat/completions` and its streaming chunks is a **Unix timestamp in seconds**,
+  because that is what OpenAI specifies and what every OpenAI SDK parses
+  (`new Date(created * 1000)`). It is not an inconsistency to be fixed — changing it would
+  break the compatibility this surface exists to provide.
 
 ### Remove an account
 
