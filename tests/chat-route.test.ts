@@ -511,3 +511,72 @@ describe("a model the upstream rejects", () => {
     expect(response.statusCode).toBe(503);
   });
 });
+
+describe("a stream that dies mid-body", () => {
+  /** Delivers one content chunk, then errors the body -- what a dropped connection does. */
+  function diesAfterContent(): typeof fetch {
+    return vi.fn(async () => {
+      let sent = false;
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (!sent) {
+            sent = true;
+            controller.enqueue(
+              new TextEncoder().encode(
+                'data: {"response":{"candidates":[{"content":{"parts":[{"text":"parcial"}]}}]}}\n\n',
+              ),
+            );
+            return;
+          }
+          controller.error(new Error("connection reset"));
+        },
+      });
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    }) as unknown as typeof fetch;
+  }
+
+  it("closes the stream with an error frame and [DONE] instead of truncating silently", async () => {
+    app = buildServer("test-key", { store, env: ENV, fetchImpl: diesAfterContent(), logger: false });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: { model: "gemini-3.8-flash", stream: true, messages: [{ role: "user", content: "hi" }] },
+    });
+
+    const body = response.body;
+    // The content that did arrive is kept...
+    expect(body).toContain("parcial");
+    // ...and the break is announced rather than left as silence, so a client can tell a
+    // failed turn from a finished one. Without the frame the client either waits forever
+    // or reports a truncated answer as complete.
+    expect(body).toContain('"error"');
+    expect(body).toContain("data: [DONE]");
+  });
+
+  it("every frame in the body is parseable JSON or the DONE sentinel", async () => {
+    app = buildServer("test-key", { store, env: ENV, fetchImpl: diesAfterContent(), logger: false });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: { model: "gemini-3.8-flash", stream: true, messages: [{ role: "user", content: "hi" }] },
+    });
+
+    const frames = response.body
+      .split("\n\n")
+      .map((block) => block.trim())
+      .filter((block) => block.startsWith("data: "))
+      .map((block) => block.slice("data: ".length));
+
+    expect(frames.length).toBeGreaterThan(0);
+    for (const frame of frames) {
+      if (frame === "[DONE]") continue;
+      // A broken frame would be worse than the original fault: the client would have no
+      // way to read the error and no way to know the stream ended.
+      expect(() => JSON.parse(frame), `frame: ${frame}`).not.toThrow();
+    }
+  });
+});

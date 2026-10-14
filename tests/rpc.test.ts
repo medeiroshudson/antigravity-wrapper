@@ -181,4 +181,59 @@ describe("readSse", () => {
     })();
     await expect(iterate).rejects.toBeInstanceOf(UpstreamError);
   });
+
+  it("reassembles a tool call whose JSON arrives split at any byte boundary", async () => {
+    // A tool call is the payload most likely to straddle a chunk: it carries a long
+    // thoughtSignature, and the signature is only useful if it survives intact into the
+    // next turn. Splitting at many boundaries proves the buffer is not boundary-dependent.
+    const frame = `data: ${JSON.stringify({
+      response: {
+        candidates: [
+          {
+            content: {
+              parts: [
+                {
+                  functionCall: { name: "get_weather", args: { city: "Paris" } },
+                  thoughtSignature: "SIG-328chars-" + "x".repeat(300),
+                },
+              ],
+            },
+          },
+        ],
+      },
+    })}\n\n`;
+
+    const whole: unknown[] = [];
+    for await (const chunk of readSse(sseResponse([frame]))) whole.push(chunk);
+
+    for (let cut = 1; cut < frame.length; cut += 7) {
+      const seen: unknown[] = [];
+      for await (const chunk of readSse(sseResponse([frame.slice(0, cut), frame.slice(cut)]))) {
+        seen.push(chunk);
+      }
+      expect(seen, `split at byte ${cut}`).toEqual(whole);
+    }
+  });
+
+  it("keeps the whole thoughtSignature when the split falls inside it", async () => {
+    const signature = "SIG-" + "abcdefghij".repeat(30);
+    const line = `data: ${JSON.stringify({
+      response: {
+        candidates: [
+          { content: { parts: [{ functionCall: { name: "t", args: {} }, thoughtSignature: signature }] } },
+        ],
+      },
+    })}\n\n`;
+
+    // Cut inside the signature itself -- where a buffer that reset per chunk would
+    // silently truncate the token and break multi-turn tool calling.
+    const at = line.indexOf(signature) + Math.floor(signature.length / 2);
+    const seen: Array<{ response?: { candidates?: Array<{ content?: { parts?: Array<{ thoughtSignature?: string }> } }> } }> = [];
+    for await (const chunk of readSse(sseResponse([line.slice(0, at), line.slice(at)]))) {
+      seen.push(chunk as never);
+    }
+
+    const parts = seen[0]?.response?.candidates?.[0]?.content?.parts ?? [];
+    expect(parts[0]?.thoughtSignature).toBe(signature);
+  });
 });
