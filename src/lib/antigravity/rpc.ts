@@ -3,8 +3,10 @@ import {
   getStreamHeaderTimeoutMs,
   getStreamStallTimeoutMs,
   getUserAgent,
+  redact,
 } from "../../config/index.js";
 import { t } from "../../i18n/index.js";
+import { noopLogger, type Logger } from "../logger.js";
 import { classifyUpstream, isDefinitive, UpstreamError } from "./errors.js";
 
 export function antigravityHeaders(
@@ -31,8 +33,10 @@ export async function streamGenerate(
     env?: NodeJS.ProcessEnv;
     fetchImpl?: typeof fetch;
     userAgent?: string | null;
+    logger?: Logger;
   } = {},
 ): Promise<Response> {
+  const logger = deps.logger ?? noopLogger;
   const fetchImpl = deps.fetchImpl ?? fetch;
   const body = JSON.stringify(envelope);
   const headerMs = getStreamHeaderTimeoutMs(deps.env);
@@ -49,6 +53,7 @@ export async function streamGenerate(
     const signal = deps.signal ? AbortSignal.any([deps.signal, controller.signal]) : controller.signal;
 
     let response: Response;
+    logger.debug({ endpoint }, "upstream attempt");
     try {
       response = await fetchImpl(`${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
         method: "POST",
@@ -61,6 +66,7 @@ export async function streamGenerate(
         throw new UpstreamError("client_error", 0, t("upstream.cancelledByClient"));
       }
       if (controller.signal.aborted) {
+        logger.warn({ endpoint, ms: headerMs }, "upstream no headers");
         throw new UpstreamError("server_error", 0, t("upstream.noHeaders", { ms: headerMs }));
       }
       throw error;
@@ -72,6 +78,10 @@ export async function streamGenerate(
 
     const text = await response.text();
     const error = classifyUpstream(response.status, text);
+    logger.warn(
+      { endpoint, status: response.status, kind: error.kind, detail: redact(error.message).slice(0, 200) },
+      "upstream rejected",
+    );
     // The endpoint list is ordered by priority, so the first answer is the authority and a
     // later one only speaks when nothing higher did. Keeping the last error instead let a
     // reserve's 429 overwrite the primary's 404, reporting a missing model as a rate limit
@@ -81,7 +91,9 @@ export async function streamGenerate(
     if (isDefinitive(error.kind) || !RETRYABLE_STATUS.has(response.status)) break;
   }
 
-  throw first ?? new UpstreamError("server_error", 0, t("upstream.noEndpoint"));
+  const exhausted = first ?? new UpstreamError("server_error", 0, t("upstream.noEndpoint"));
+  logger.warn({ status: exhausted.status, kind: exhausted.kind }, "upstream exhausted");
+  throw exhausted;
 }
 
 export interface UsageMetadata {
@@ -121,14 +133,15 @@ function parseSseLine(line: string): StreamChunk | null {
  */
 export async function* readSse(
   response: Response,
-  opts: { signal?: AbortSignal; stallMs?: number } = {},
+  opts: { signal?: AbortSignal; env?: NodeJS.ProcessEnv; logger?: Logger } = {},
 ): AsyncGenerator<StreamChunk> {
   if (!response.body) {
     throw new UpstreamError("server_error", response.status, t("upstream.emptyBody"));
   }
+  const logger = opts.logger ?? noopLogger;
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
-  const stallMs = opts.stallMs ?? getStreamStallTimeoutMs();
+  const stallMs = getStreamStallTimeoutMs(opts.env);
   const signal = opts.signal;
   let buffer = "";
 
@@ -152,10 +165,10 @@ export async function* readSse(
       const stall =
         stallMs > 0
           ? new Promise<never>((_, reject) => {
-              timer = setTimeout(
-                () => reject(new UpstreamError("server_error", 0, t("upstream.stalled", { ms: stallMs }))),
-                stallMs,
-              );
+              timer = setTimeout(() => {
+                logger.warn({ ms: stallMs }, "upstream stalled");
+                reject(new UpstreamError("server_error", 0, t("upstream.stalled", { ms: stallMs })));
+              }, stallMs);
             })
           : null;
 

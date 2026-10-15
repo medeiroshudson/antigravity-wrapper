@@ -1,6 +1,7 @@
 import { getDbPath, getModelsTtlMs, getQuotaRefreshTtlMs } from "../config/index.js";
 import { AccountService } from "./accounts/service.js";
 import { AccountStore } from "./accounts/store.js";
+import { noopLogger, type Logger } from "./logger.js";
 
 let store: AccountStore | null = null;
 let service: AccountService | null = null;
@@ -10,8 +11,8 @@ export function getStore(env: NodeJS.ProcessEnv = process.env): AccountStore {
   return store;
 }
 
-export function getAccountService(env: NodeJS.ProcessEnv = process.env): AccountService {
-  if (!service) service = new AccountService({ store: getStore(env), env });
+export function getAccountService(env: NodeJS.ProcessEnv = process.env, logger: Logger = noopLogger): AccountService {
+  if (!service) service = new AccountService({ store: getStore(env), env, logger });
   return service;
 }
 
@@ -31,15 +32,25 @@ export function resetRuntime(): void {
  */
 export function startCatalogRefresh(
   env: NodeJS.ProcessEnv = process.env,
-  deps: { store?: AccountStore; service?: AccountService } = {},
+  deps: { store?: AccountStore; service?: AccountService; logger?: Logger } = {},
 ): { stop: () => void } {
+  const logger = deps.logger ?? noopLogger;
   const store = deps.store ?? getStore(env);
-  const service = deps.service ?? getAccountService(env);
+  const service = deps.service ?? getAccountService(env, logger);
 
   const pass = async (): Promise<void> => {
-    for (const account of store.listAccounts()) {
+    const accounts = store.listAccounts();
+    logger.debug({ accounts: accounts.length }, "refresh pass");
+    for (const account of accounts) {
       if (!account.enabled || account.status === "invalid") continue;
-      await service.refreshQuota(account.id).catch(() => undefined);
+      await service.refreshQuota(account.id).catch((error: unknown) => {
+        // Best-effort by design, but swallowing it whole left a failing account
+        // invisible in the log.
+        logger.warn(
+          { accountId: account.id, err: error instanceof Error ? error.message : String(error) },
+          "refresh failed",
+        );
+      });
     }
   };
 

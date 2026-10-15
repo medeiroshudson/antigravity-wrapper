@@ -2,7 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import { config as loadEnv } from "dotenv";
 import Fastify from "fastify";
 import type { FastifyInstance, FastifyServerOptions } from "fastify";
-import { getHost, getLogLevel, getPort, resolveApiKey } from "./config/index.js";
+import { getBodyLimitBytes, getHost, getLogLevel, getPort, resolveApiKey } from "./config/index.js";
 import { resolveLocale, setLocale, t } from "./i18n/index.js";
 import type { AccountStore } from "./lib/accounts/store.js";
 import { toOpenAIErrorBody } from "./lib/openai-format/index.js";
@@ -43,6 +43,7 @@ export function buildServer(
   });
   const app = Fastify({
     logger: deps.logger ?? { level: getLogLevel({ ...process.env, ...(deps.env ?? {}) }) },
+    bodyLimit: getBodyLimitBytes({ ...process.env, ...(deps.env ?? {}) }),
   });
 
   // Bearer required on EVERY route, including /health and /admin.
@@ -53,6 +54,10 @@ export function buildServer(
     const wanted = Buffer.from(expected);
     const valid = provided.length === wanted.length && timingSafeEqual(provided, wanted);
     if (!valid) {
+      request.log.warn(
+        { url: request.url, method: request.method, remoteAddress: request.ip },
+        "request unauthorized",
+      );
       reply.status(401).send({
         error: {
           message: t("auth.invalidCredentials"),
@@ -70,9 +75,19 @@ export function buildServer(
 
   app.get("/health", async () => ({ status: "ok" }));
 
-  app.setErrorHandler((error: unknown, _request, reply) => {
+  app.setErrorHandler((error: unknown, request, reply) => {
     const status = readStatus(error) === 400 ? 400 : 500;
     const mapped = toOpenAIErrorBody(error, status);
+    // Fastify's own failures — most importantly the 413 it raises when a body
+    // exceeds `bodyLimit` — reach here with no other log line naming the reason.
+    request.log.warn(
+      {
+        status: mapped.status,
+        code: typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined,
+        err: error instanceof Error ? error.message : String(error),
+      },
+      "request failed",
+    );
     reply.status(mapped.status).send(mapped.body);
   });
 
@@ -87,7 +102,11 @@ if (isMain) {
   const app = buildServer();
   // Catalog/quota discovery only here, never in buildServer: tests neither open
   // the real database nor touch the network.
-  const catalog = startCatalogRefresh();
+  const catalog = startCatalogRefresh(process.env, { logger: app.log });
+  app.log.info(
+    { port: getPort(), host: getHost(), logLevel: getLogLevel(process.env), bodyLimitBytes: getBodyLimitBytes(process.env) },
+    "server starting",
+  );
   app.listen({ port: getPort(), host: getHost() }).catch((error: unknown) => {
     app.log.error(error instanceof Error ? error.message : String(error));
     process.exit(1);

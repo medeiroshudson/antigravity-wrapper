@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   assertSafeBaseUrl,
   endpointCandidates,
+  getBodyLimitBytes,
   getLogLevel,
   getMaxFailoverAttempts,
   getUserAgent,
@@ -89,6 +90,18 @@ describe("numeric values", () => {
     expect(getMaxFailoverAttempts({ MAX_FAILOVER_ATTEMPTS: "5" })).toBe(5);
     expect(getMaxFailoverAttempts({ MAX_FAILOVER_ATTEMPTS: "zero" })).toBe(3);
     expect(getMaxFailoverAttempts({ MAX_FAILOVER_ATTEMPTS: "0" })).toBe(3);
+  });
+});
+
+describe("getBodyLimitBytes", () => {
+  it("defaults above the Fastify 1 MiB limit that refused real agent turns", () => {
+    expect(getBodyLimitBytes({})).toBe(33_554_432);
+  });
+
+  it("honours an override and ignores a non-positive value", () => {
+    expect(getBodyLimitBytes({ BODY_LIMIT_BYTES: "1048576" })).toBe(1_048_576);
+    expect(getBodyLimitBytes({ BODY_LIMIT_BYTES: "0" })).toBe(33_554_432);
+    expect(getBodyLimitBytes({ BODY_LIMIT_BYTES: "nope" })).toBe(33_554_432);
   });
 });
 

@@ -82,6 +82,10 @@ export function getHost(env: NodeJS.ProcessEnv = process.env): string {
   return value && value.length > 0 ? value : "0.0.0.0";
 }
 
+export function getBodyLimitBytes(env: NodeJS.ProcessEnv = process.env): number {
+  return positiveInt(env.BODY_LIMIT_BYTES, 33_554_432);
+}
+
 export function getUpstreamTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
   return positiveInt(env.UPSTREAM_TIMEOUT_MS, 120_000);
 }

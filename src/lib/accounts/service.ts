@@ -4,20 +4,26 @@ import { t } from "../../i18n/index.js";
 import { loadCodeAssistInfo, refreshAccessToken } from "../antigravity/oauth.js";
 import { fetchAvailableModels, retrieveUserQuotaSummary } from "../antigravity/quota.js";
 import { UpstreamError } from "../antigravity/errors.js";
+import { noopLogger, type Logger } from "../logger.js";
 import { order } from "./selector.js";
 import type { Account, AccountSnapshot, AccountStore } from "./store.js";
 
 const REFRESH_SKEW_MS = 5 * 60 * 1000;
 
 export class AccountService {
+  private readonly logger: Logger;
+
   constructor(
     private readonly deps: {
       store: AccountStore;
       env?: NodeJS.ProcessEnv;
       fetchImpl?: typeof fetch;
       now?: () => number;
+      logger?: Logger;
     },
-  ) {}
+  ) {
+    this.logger = deps.logger ?? noopLogger;
+  }
 
   private now(): number {
     return this.deps.now ? this.deps.now() : Date.now();
@@ -34,6 +40,7 @@ export class AccountService {
         fetchImpl: this.deps.fetchImpl,
       });
     } catch (error) {
+      this.logger.warn({ accountId: account.id }, "token refresh failed");
       // A dead refresh is a classified authentication failure, not a generic
       // error: this way the runner marks the account `invalid` and moves on to
       // the next candidate (spec §11), instead of aborting the whole request with 502.
@@ -43,6 +50,7 @@ export class AccountService {
         error instanceof Error ? error.message : t("account.refreshFailed"),
       );
     }
+    this.logger.debug({ accountId: account.id }, "token refreshed");
     this.deps.store.setTokens(account.id, {
       accessToken: refreshed.accessToken,
       accessExpiresAt: refreshed.expiresAt,
@@ -149,5 +157,16 @@ export class AccountService {
     if (info) {
       this.deps.store.setPaidTier(id, { id: info.paidTierId, name: info.paidTierName });
     }
+
+    this.logger.info(
+      {
+        accountId: id,
+        models: entries.length,
+        quotaRows: summary.rows.length,
+        paidTierId: info?.paidTierId ?? null,
+        summaryError: summary.failure === null ? null : summary.failure.reason,
+      },
+      "quota refreshed",
+    );
   }
 }

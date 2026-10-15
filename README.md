@@ -789,12 +789,48 @@ is embedded in the code.
 | `COOLDOWN_TRANSIENT_MS` | `60000` | Fallback cooldown when a quota wall names no reset time |
 | `TRANSIENT_RETRY_BACKOFF_MS` | `1000` | Wait before retrying the same account after a transient throttle (`0` retries at once) |
 | `MAX_FAILOVER_ATTEMPTS` | `3` | Ceiling on accounts tried per request |
-| `LOG_LEVEL` | `info` | Logger level |
+| `BODY_LIMIT_BYTES` | `33554432` | Max request body in bytes before a `413`; raise it for very large turns |
+| `LOG_LEVEL` | `info` | Logger level. `info` shows one summary line per request; `debug` adds the per-attempt trace |
 | `APP_LOCALE` | `en-US` | Locale for the messages the API returns; an unknown value falls back to `en-US` |
 
 `ANTIGRAVITY_BASE_URL` is deliberately restrictive: it accepts only `https` URLs on a
 Google APIs host. That guard exists so a poisoned value cannot be used to exfiltrate the
 bearer token to an arbitrary server.
+
+### Reading the logs
+
+The service logs to stdout as JSON. Every line of one request carries the same Fastify
+`reqId`, so a whole turn can be pulled out of the terminal with `jq`:
+
+```bash
+# everything that happened to one request
+node dist/server.js 2>&1 | jq 'select(.reqId=="req-9")'
+
+# every request that ended in an upstream rejection, with its cause
+... | jq 'select(.msg=="upstream rejected") | {reqId, status, kind, endpoint}'
+
+# the reason a 404/503 was returned, naming the model and the accounts tried
+... | jq 'select(.msg=="all accounts failed" or .msg=="turn rejected")'
+```
+
+The lines worth knowing:
+
+| Line | Level | What it tells you |
+|---|---|---|
+| `chat request` | debug | The model, stream flag, message and tool counts of an incoming turn |
+| `model not in catalog` | warn | A `404` because the requested id is unknown to the pool's catalog |
+| `turn candidates` | debug | The accounts the selector offered, in order, before the pool is tried |
+| `account attempt` | debug | Each account the runner tries |
+| `upstream attempt` / `upstream rejected` | debug / warn | Each endpoint call and the classified cause of a rejection |
+| `account failure` | warn | Why one account was dropped — `kind`, upstream `status`, and the state change (`action`) |
+| `turn rejected` | warn | Every account agreed on a definitive error (e.g. a model none of them has) |
+| `all accounts failed` | warn | The pool exhausted; names the model and each account's failure kind |
+| `chat completed` / `chat failed` | info / warn | The outcome of a turn — model, the account that served it, tokens, elapsed time |
+| `request unauthorized` | warn | A `401` from a missing or wrong bearer |
+| `request failed` | warn | A Fastify error it handled — most importantly the **`413`** for an oversized body |
+
+Prompt and completion content is never logged, and upstream error detail is passed
+through `redact()`, so tokens cannot reach a log line.
 
 ---
 

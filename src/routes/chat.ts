@@ -48,18 +48,28 @@ const bodySchema = {
 } as const;
 
 /**
- * A definitive upstream failure is about the request, not the pool, so it is reported with
- * the model named and as a 404. Everything else keeps its existing mapping (spec D12).
+ * The upstream classifies a definitive failure by *why* it refused; the caller must see
+ * the same distinction. A `model_not_found` is a 404 naming the model, but a
+ * `client_error` (400 — a rejected request) or a `license` (403) is not a missing model
+ * and must keep its own status and message: collapsing every definitive error onto 404
+ * "not found" sent the caller to the catalog when the request was what the backend
+ * refused (spec D12).
  */
 function mapTurnError(
   error: unknown,
   model: string,
   fallback: number,
 ): { status: number; body: { error: unknown } } {
-  if (error instanceof UpstreamError && isDefinitive(error.kind)) {
+  if (error instanceof UpstreamError && error.kind === "model_not_found") {
     return toOpenAIErrorBody(
       new Error(t("chat.modelRejected", { model, detail: error.message })),
       404,
+    ) as { status: number; body: { error: unknown } };
+  }
+  if (error instanceof UpstreamError && isDefinitive(error.kind)) {
+    return toOpenAIErrorBody(
+      new Error(t("chat.modelRejected", { model, detail: error.message })),
+      error.status,
     ) as { status: number; body: { error: unknown } };
   }
   return toOpenAIErrorBody(error, fallback) as { status: number; body: { error: unknown } };
@@ -86,8 +96,23 @@ export async function chatRoutes(
 ): Promise<void> {
   app.post<{ Body: ChatBody }>("/v1/chat/completions", { schema: bodySchema }, async (request, reply) => {
     const body = request.body;
+    // Correlates every line of this turn with the reqId Fastify already logs. The
+    // request log carries it; the runner and the upstream layer get this same logger.
+    const log = request.log;
+    const requestStart = Date.now();
+    log.debug(
+      {
+        model: body.model,
+        stream: Boolean(body.stream),
+        messages: body.messages?.length ?? 0,
+        tools: Array.isArray(body.tools) ? body.tools.length : 0,
+        reasoning_effort: body.reasoning_effort ?? null,
+      },
+      "chat request",
+    );
 
     if (!getPublicModels().some((model) => model.id === body.model)) {
+      log.warn({ model: body.model }, "model not in catalog");
       const mapped = toOpenAIErrorBody(new Error(t("chat.modelNotFound", { model: body.model })), 404);
       reply.status(404).send(mapped.body);
       return;
@@ -101,6 +126,10 @@ export async function chatRoutes(
     try {
       ({ contents, systemInstruction } = toContents(body.messages));
     } catch (error) {
+      log.warn(
+        { model: body.model, err: error instanceof Error ? error.message : String(error) },
+        "invalid messages",
+      );
       const mapped = toOpenAIErrorBody(error, 400);
       reply.status(mapped.status).send(mapped.body);
       return;
@@ -118,9 +147,9 @@ export async function chatRoutes(
     // The injected store (buildServer) must win: the runtime.ts singletons
     // exist for the production entrypoint, not for the route under test.
     const accounts = deps.store
-      ? new AccountService({ store: deps.store, env: deps.env, fetchImpl: deps.fetchImpl })
-      : getAccountService(deps.env);
-    const runner = new TurnRunner({ accounts, env: deps.env, fetchImpl: deps.fetchImpl });
+      ? new AccountService({ store: deps.store, env: deps.env, fetchImpl: deps.fetchImpl, logger: log })
+      : getAccountService(deps.env, log);
+    const runner = new TurnRunner({ accounts, env: deps.env, fetchImpl: deps.fetchImpl, logger: log });
     const turnInput = {
       runtimeModel,
       contents,
@@ -141,10 +170,33 @@ export async function chatRoutes(
 
     if (!body.stream) {
       try {
-        const { result } = await runner.run(turnInput, { signal: disconnect.signal });
+        const { result, accountId } = await runner.run(turnInput, { signal: disconnect.signal });
+        log.info(
+          {
+            model: body.model,
+            runtimeModel,
+            accountId,
+            stream: false,
+            finishReason: result.finishReason,
+            toolCalls: result.toolCalls.length,
+            tokens: result.usage?.total_tokens ?? null,
+            elapsedMs: Date.now() - requestStart,
+          },
+          "chat completed",
+        );
         reply.status(200).send(buildCompletion(result, body.model));
       } catch (error) {
         const mapped = mapTurnError(error, body.model, error instanceof AllAccountsFailedError ? 503 : 502);
+        log.warn(
+          {
+            model: body.model,
+            runtimeModel,
+            status: mapped.status,
+            kind: error instanceof UpstreamError ? error.kind : "pool",
+            elapsedMs: Date.now() - requestStart,
+          },
+          "chat failed",
+        );
         reply.status(mapped.status).send(mapped.body);
       }
       return;
@@ -167,7 +219,7 @@ export async function chatRoutes(
     };
 
     try {
-      const { result } = await runner.run(turnInput, {
+      const { result, accountId } = await runner.run(turnInput, {
         signal: disconnect.signal,
         onDelta: (text) => {
           if (disconnect.signal.aborted || reply.raw.destroyed) throw new Error(t("chat.clientDisconnected"));
@@ -193,8 +245,32 @@ export async function chatRoutes(
       }
       writeChunk({}, result.finishReason);
       reply.raw.write(SSE_DONE);
+      log.info(
+        {
+          model: body.model,
+          runtimeModel,
+          accountId,
+          stream: true,
+          finishReason: result.finishReason,
+          toolCalls: result.toolCalls.length,
+          tokens: result.usage?.total_tokens ?? null,
+          elapsedMs: Date.now() - requestStart,
+        },
+        "chat completed",
+      );
     } catch (error) {
       const mapped = mapTurnError(error, body.model, error instanceof AllAccountsFailedError ? 503 : 502);
+      log.warn(
+        {
+          model: body.model,
+          runtimeModel,
+          status: mapped.status,
+          kind: error instanceof UpstreamError ? error.kind : "pool",
+          headersSent: started,
+          elapsedMs: Date.now() - requestStart,
+        },
+        "chat failed",
+      );
       if (started) {
         // Headers already on the wire: the error becomes a frame, followed by an
         // explicit [DONE] so the client does not read the silence as a truncated

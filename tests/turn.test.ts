@@ -3,6 +3,7 @@ import { ENDPOINTS } from "../src/config/index.js";
 import { AllAccountsFailedError, TurnRunner } from "../src/lib/chat/turn.js";
 import type { AccountService } from "../src/lib/accounts/service.js";
 import type { AccountSnapshot } from "../src/lib/accounts/store.js";
+import { captureLogger } from "./fixtures/logger.js";
 
 function snapshot(id: string): AccountSnapshot {
   return {
@@ -374,5 +375,65 @@ describe("TurnRunner", () => {
     const runner = new TurnRunner({ accounts, fetchImpl });
     await runner.run(BASE).catch(() => undefined);
     expect(accounts.refreshQuota).toHaveBeenCalledWith("a1");
+  });
+});
+
+describe("TurnRunner logging", () => {
+  it("names the requested model when every account rejects it as missing", async () => {
+    // The incident this logging exists for: a 404 that took ~15s and left the pool
+    // loop invisible. The line must say what was asked and which accounts answered.
+    const fetchImpl = vi.fn(
+      async () => new Response('{"error":{"message":"Requested entity was not found."}}', { status: 404 }),
+    ) as unknown as typeof fetch;
+    const accounts = service([snapshot("a1"), snapshot("a2")]);
+    const { logger, lines } = captureLogger();
+    const runner = new TurnRunner({ accounts, fetchImpl, logger });
+
+    await runner.run(BASE).catch(() => undefined);
+
+    const perAccount = lines.filter((l) => l.msg === "account failure");
+    expect(perAccount).toHaveLength(2);
+    expect(perAccount.map((l) => l.obj.accountId)).toEqual(["a1", "a2"]);
+    expect(perAccount[0]?.obj.kind).toBe("model_not_found");
+
+    const rejected = lines.find((l) => l.msg === "turn rejected");
+    expect(rejected?.level).toBe("warn");
+    expect(rejected?.obj.runtimeModel).toBe("gemini-3.8-flash-low");
+    expect(rejected?.obj.kind).toBe("model_not_found");
+  });
+
+  it("summarizes the whole pool when the accounts disagree", async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response('{"error":{"message":"Quota reached. Resets in 1h."}}', { status: 429 }),
+    ) as unknown as typeof fetch;
+    const accounts = service([snapshot("a1"), snapshot("a2")]);
+    const { logger, lines } = captureLogger();
+    const runner = new TurnRunner({ accounts, fetchImpl, logger });
+
+    await runner.run(BASE).catch(() => undefined);
+
+    const failed = lines.find((l) => l.msg === "all accounts failed");
+    expect(failed?.level).toBe("warn");
+    expect(failed?.obj.runtimeModel).toBe("gemini-3.8-flash-low");
+    expect(failed?.obj.failures).toEqual([
+      { accountId: "a1", kind: "quota" },
+      { accountId: "a2", kind: "quota" },
+    ]);
+    // A quota wall is the one failure that changes account state: name the action.
+    expect(lines.filter((l) => l.msg === "account failure")[0]?.obj.action).toBe("cooldown");
+  });
+
+  it("logs the candidate order at debug so a turn can be traced step by step", async () => {
+    const fetchImpl = vi.fn(async () => sse(TEXT_SSE)) as unknown as typeof fetch;
+    const accounts = service([snapshot("a1")]);
+    const { logger, lines } = captureLogger();
+    const runner = new TurnRunner({ accounts, fetchImpl, logger });
+    await runner.run(BASE);
+
+    const candidates = lines.find((l) => l.msg === "turn candidates");
+    expect(candidates?.level).toBe("debug");
+    expect(candidates?.obj.runtimeModel).toBe("gemini-3.8-flash-low");
+    expect(candidates?.obj.candidates).toEqual(["a1"]);
+    expect(lines.some((l) => l.msg === "account attempt" && l.level === "debug")).toBe(true);
   });
 });

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyServerOptions } from "fastify";
 import { buildServer } from "../src/server.js";
 import { AccountStore } from "../src/lib/accounts/store.js";
 import { applyCatalog, resetRegistryForTests } from "../src/config/models.js";
@@ -510,6 +510,34 @@ describe("a model the upstream rejects", () => {
     // The account-level path is unchanged: a quota wall is still the pool's problem.
     expect(response.statusCode).toBe(503);
   });
+
+  it("reports a rejected request as 400, not as a missing model", async () => {
+    // Measured on the live backend: an advertised id (gemini-3-flash) answers 400
+    // "Request contains an invalid argument" -- the model exists, the request is what
+    // the backend refused. Mapping every definitive error onto 404 "not found" told the
+    // caller the model was missing, sending the hunt to the catalog where nothing was
+    // wrong.
+    applyCatalog(CATALOG);
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response('{"error":{"message":"Request contains an invalid argument."}}', { status: 400 }),
+    ) as unknown as typeof fetch;
+    app = buildServer("test-key", { store, env: ENV, fetchImpl, logger: false });
+    seed();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: { model: "gemini-3.8-flash", stream: false, messages: [{ role: "user", content: "hi" }] },
+    });
+    const body = response.json() as { error: { message: string; type: string } };
+
+    expect(response.statusCode).toBe(400);
+    expect(body.error.type).toBe("invalid_request_error");
+    expect(body.error.message).toContain("gemini-3.8-flash");
+    expect(body.error.message).toContain("invalid argument");
+  });
 });
 
 describe("a stream that dies mid-body", () => {
@@ -578,5 +606,80 @@ describe("a stream that dies mid-body", () => {
       // way to read the error and no way to know the stream ended.
       expect(() => JSON.parse(frame), `frame: ${frame}`).not.toThrow();
     }
+  });
+});
+
+/**
+ * A Fastify logger that serializes to memory, so a test can read the structured
+ * JSON an operator would grep in the terminal.
+ */
+function captureFastifyLog(): {
+  logger: FastifyServerOptions["logger"];
+  entries: () => Array<Record<string, unknown>>;
+} {
+  const chunks: string[] = [];
+  return {
+    logger: { level: "debug", stream: { write: (line: string) => void chunks.push(line) } },
+    entries: () =>
+      chunks
+        .join("")
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as Record<string, unknown>),
+  };
+}
+
+describe("request logging", () => {
+  it("reports an oversized body as a 413 instead of a silent drop", async () => {
+    const { logger, entries } = captureFastifyLog();
+    app = buildServer("test-key", {
+      store,
+      env: { ...ENV, BODY_LIMIT_BYTES: "64" },
+      fetchImpl: fetchOk(),
+      logger,
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: { model: "gemini-3.8-flash", messages: [{ role: "user", content: "x".repeat(500) }] },
+    });
+
+    expect(response.statusCode).toBe(413);
+    const line = entries().find((entry) => entry.msg === "request failed");
+    expect(line?.status).toBe(413);
+  });
+
+  it("a default body limit above 1 MiB serves the large turns the old limit refused", async () => {
+    const { logger } = captureFastifyLog();
+    app = buildServer("test-key", { store, env: ENV, fetchImpl: fetchOk(), logger });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: { model: "gemini-3.8-flash", messages: [{ role: "user", content: "x".repeat(2_000_000) }] },
+    });
+
+    expect(response.statusCode).toBe(200);
+  });
+
+  it("logs the completed turn with its model, account and reqId", async () => {
+    const { logger, entries } = captureFastifyLog();
+    app = buildServer("test-key", { store, env: ENV, fetchImpl: fetchOk(), logger });
+
+    await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: { model: "gemini-3.8-flash", messages: [{ role: "user", content: "oi" }] },
+    });
+
+    const line = entries().find((entry) => entry.msg === "chat completed");
+    expect(line?.model).toBe("gemini-3.8-flash");
+    expect(line?.accountId).toBe("a1");
+    expect(line?.finishReason).toBe("stop");
+    expect(typeof line?.reqId).toBe("string");
   });
 });

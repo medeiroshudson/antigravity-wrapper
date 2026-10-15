@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { antigravityHeaders, readSse, streamGenerate } from "../src/lib/antigravity/rpc.js";
 import { UpstreamError } from "../src/lib/antigravity/errors.js";
+import { captureLogger } from "./fixtures/logger.js";
 
 function sseResponse(chunks: string[]): Response {
   const body = new ReadableStream<Uint8Array>({
@@ -109,6 +110,38 @@ describe("error attribution across endpoints", () => {
   });
 });
 
+describe("streamGenerate logging", () => {
+  it("records each endpoint answer with its classified kind", async () => {
+    const { logger, lines } = captureLogger();
+    const rejected = vi.fn(async () => new Response('{"error":{"message":"nope"}}', { status: 404 }));
+    await streamGenerate("tok", {}, { logger, fetchImpl: rejected as unknown as typeof fetch }).catch(
+      () => undefined,
+    );
+
+    const rejectedLine = lines.find((l) => l.msg === "upstream rejected");
+    expect(rejectedLine?.level).toBe("warn");
+    expect(rejectedLine?.obj.status).toBe(404);
+    expect(rejectedLine?.obj.kind).toBe("model_not_found");
+    expect(typeof rejectedLine?.obj.endpoint).toBe("string");
+    expect(lines.some((l) => l.msg === "upstream exhausted")).toBe(true);
+    expect(lines.some((l) => l.msg === "upstream attempt" && l.level === "debug")).toBe(true);
+  });
+
+  it("never lets a bearer token reach the upstream detail field", async () => {
+    const { logger, lines } = captureLogger();
+    const leak = vi.fn(
+      async () =>
+        new Response('{"error":{"message":"token=ya29.SYNTHETICTOKENVALUE0000"}}', { status: 500 }),
+    );
+    await streamGenerate("tok", {}, { logger, fetchImpl: leak as unknown as typeof fetch }).catch(
+      () => undefined,
+    );
+
+    const detail = String(lines.find((l) => l.msg === "upstream rejected")?.obj.detail ?? "");
+    expect(detail).not.toContain("ya29.SYNTHETIC");
+  });
+});
+
 describe("streamGenerate timeouts", () => {
   /** A fetch that only settles when the signal aborts: a backend that accepts and never responds. */
   function hangingFetch(): typeof fetch {
@@ -175,7 +208,7 @@ describe("readSse", () => {
   it("ends with an error when the server goes silent (stall watchdog)", async () => {
     const response = silentResponse();
     const iterate = (async () => {
-      for await (const chunk of readSse(response, { stallMs: 20 })) {
+      for await (const chunk of readSse(response, { env: { STREAM_STALL_TIMEOUT_MS: "20" } })) {
         void chunk;
       }
     })();

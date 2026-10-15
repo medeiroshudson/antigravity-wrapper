@@ -6,6 +6,7 @@ import { buildEnvelope, newRequestIdentity, type GeminiContent } from "../antigr
 import { isDefinitive, UpstreamError } from "../antigravity/errors.js";
 import { readSse, streamGenerate } from "../antigravity/rpc.js";
 import type { TurnResult } from "../openai-format/index.js";
+import { noopLogger, type Logger } from "../logger.js";
 import { normalizeToolCalls } from "./tools.js";
 
 export interface TurnInput {
@@ -40,6 +41,7 @@ export interface TurnDeps {
   accounts: AccountService;
   env?: NodeJS.ProcessEnv;
   fetchImpl?: typeof fetch;
+  logger?: Logger;
 }
 
 /**
@@ -72,7 +74,11 @@ function mapFinishReason(reason: string): string {
  * failure becomes a visible error (spec §6.3).
  */
 export class TurnRunner {
-  constructor(private readonly deps: TurnDeps) {}
+  private readonly logger: Logger;
+
+  constructor(private readonly deps: TurnDeps) {
+    this.logger = deps.logger ?? noopLogger;
+  }
 
   async run(
     input: TurnInput,
@@ -82,6 +88,10 @@ export class TurnRunner {
     const limit = getMaxFailoverAttempts(this.deps.env);
     const backoffMs = getTransientRetryBackoffMs(this.deps.env);
     const failures: Array<{ accountId: string; kind: string; message: string }> = [];
+    this.logger.debug(
+      { runtimeModel: input.runtimeModel, candidates: candidates.map((c) => c.id), limit },
+      "turn candidates",
+    );
     // The first definitive error seen across the pool. A 404 is authoritative for an
     // endpoint but not for an account (see the catch below), so it is remembered and only
     // rethrown once every account has failed with the same kind.
@@ -97,6 +107,7 @@ export class TurnRunner {
       // would spend the next account on a problem the first one does not have.
       for (let attempt = 0; ; attempt += 1) {
         try {
+          this.logger.debug({ accountId: candidate.id, attempt }, "account attempt");
           const fresh = await this.deps.accounts.ensureFresh(candidate);
           if (!fresh.projectId) {
             throw new UpstreamError("server_error", 0, t("chat.accountWithoutProjectId"));
@@ -119,16 +130,40 @@ export class TurnRunner {
           // rethrown below only once every account agrees (spec D10, §6.2).
           if (isDefinitive(error.kind)) {
             definitiveError ??= error;
+            this.logger.warn(
+              { accountId: candidate.id, kind: error.kind, status: error.status, definitive: true },
+              "account failure",
+            );
             failures.push({ accountId: candidate.id, kind: error.kind, message: error.message });
             break;
           }
 
           if (error.kind === "transient_rate_limit" && attempt < TRANSIENT_RETRIES) {
+            this.logger.debug(
+              { accountId: candidate.id, kind: error.kind, backoffMs },
+              "transient retry",
+            );
             if (backoffMs > 0) await sleep(backoffMs);
             continue;
           }
 
           this.deps.accounts.applyFailure(candidate.id, error);
+          this.logger.warn(
+            {
+              accountId: candidate.id,
+              kind: error.kind,
+              status: error.status,
+              // client_error, model_not_found, server_error and license change no state,
+              // so name the action instead of the (misleadingly empty) cooldown window.
+              action:
+                error.kind === "quota"
+                  ? "cooldown"
+                  : error.kind === "auth" || error.kind === "validation_required"
+                    ? "invalid"
+                    : "none",
+            },
+            "account failure",
+          );
           // After a 429 that account's snapshot is stale: refresh the quota
           // best-effort (spec §9.3). Without blocking failover.
           if (error.status === 429) {
@@ -146,9 +181,20 @@ export class TurnRunner {
     // (spec D10).
     const definitive = definitiveError;
     if (definitive && failures.every((failure) => failure.kind === definitive.kind)) {
+      this.logger.warn(
+        { runtimeModel: input.runtimeModel, kind: definitive.kind, status: definitive.status },
+        "turn rejected",
+      );
       throw definitive;
     }
 
+    this.logger.warn(
+      {
+        runtimeModel: input.runtimeModel,
+        failures: failures.map((f) => ({ accountId: f.accountId, kind: f.kind })),
+      },
+      "all accounts failed",
+    );
     throw new AllAccountsFailedError(failures);
   }
 
@@ -177,6 +223,7 @@ export class TurnRunner {
       signal: opts.signal,
       env: this.deps.env,
       fetchImpl: this.deps.fetchImpl,
+      logger: this.logger,
     });
 
     let content = "";
@@ -186,7 +233,7 @@ export class TurnRunner {
     const toolParts: Array<Record<string, unknown>> = [];
 
     try {
-      for await (const chunk of readSse(response, { signal: opts.signal })) {
+      for await (const chunk of readSse(response, { signal: opts.signal, env: this.deps.env, logger: this.logger })) {
         const candidate = chunk.response?.candidates?.[0];
         for (const part of candidate?.content?.parts ?? []) {
           const text = part.text;

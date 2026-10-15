@@ -7,6 +7,7 @@ import { AccountStore } from "../src/lib/accounts/store.js";
 import { TurnRunner } from "../src/lib/chat/turn.js";
 import { UpstreamError } from "../src/lib/antigravity/errors.js";
 import { getPublicModels, resetRegistryForTests } from "../src/config/models.js";
+import { captureLogger } from "./fixtures/logger.js";
 
 const ENV = { ANTIGRAVITY_CLIENT_ID: "cid", ANTIGRAVITY_CLIENT_SECRET: "sec" };
 let dir: string;
@@ -392,6 +393,36 @@ describe("refreshQuota", () => {
     expect(store.getAccount("a1")?.accessToken).toBe("novo");
     expect(urls.some((url) => url.includes("retrieveUserQuotaSummary"))).toBe(true);
     expect(urls.some((url) => url.includes("loadCodeAssist"))).toBe(true);
+  });
+
+  it("summarizes a successful refresh and never logs a token", async () => {
+    seed();
+    const { logger, lines } = captureLogger();
+    await new AccountService({ store, env: ENV, fetchImpl: upstream(), logger }).refreshQuota("a1");
+
+    const line = lines.find((l) => l.msg === "quota refreshed");
+    expect(line?.level).toBe("info");
+    expect(line?.obj.accountId).toBe("a1");
+    expect(line?.obj.models).toBeGreaterThan(0);
+    expect(line?.obj.quotaRows).toBe(2);
+    expect(line?.obj.paidTierId).toBe("g1-pro-tier");
+    // No line may carry the access token the refresh works with.
+    expect(lines.some((l) => JSON.stringify(l.obj).includes("a-a1"))).toBe(false);
+  });
+
+  it("logs a token refresh failure before failing the account over", async () => {
+    seed("a1", { accessExpiresAt: Date.now() - 1000 });
+    const { logger, lines } = captureLogger();
+    const fetchImpl = vi.fn(
+      async () => new Response('{"error":"invalid_grant"}', { status: 400 }),
+    ) as unknown as typeof fetch;
+    await new AccountService({ store, env: ENV, fetchImpl, logger })
+      .ensureFresh(store.getAccount("a1")!)
+      .catch(() => undefined);
+
+    const line = lines.find((l) => l.msg === "token refresh failed");
+    expect(line?.level).toBe("warn");
+    expect(line?.obj.accountId).toBe("a1");
   });
 });
 
