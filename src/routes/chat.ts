@@ -4,8 +4,9 @@ import { getPublicModels, normalizeEffort, resolveRuntimeModel } from "../config
 import { t } from "../i18n/index.js";
 import type { AccountStore } from "../lib/accounts/store.js";
 import { AccountService } from "../lib/accounts/service.js";
-import { isDefinitive, UpstreamError } from "../lib/antigravity/errors.js";
+import { isDefinitive, isPoolRateLimited, UpstreamError } from "../lib/antigravity/errors.js";
 import { AllAccountsFailedError, TurnRunner } from "../lib/chat/turn.js";
+import { toResetPhrase } from "../lib/format/datetime.js";
 import { toContents, type ChatMessage } from "../lib/chat/compose.js";
 import {
   buildFunctionDeclarations,
@@ -54,11 +55,17 @@ const bodySchema = {
  * and must keep its own status and message: collapsing every definitive error onto 404
  * "not found" sent the caller to the catalog when the request was what the backend
  * refused (spec D12).
+ *
+ * A pool that failed only on rate limits is the one case that must NOT be a 503: a 503
+ * `server_error` reads as "retry now". A retryable 429 did not help either — measured, the
+ * client re-issued every ~0.5s while stuck in "thinking", so the loop never ended. It is
+ * reported as a 400 the client treats as final, naming the model and saying to try another.
  */
 function mapTurnError(
   error: unknown,
   model: string,
   fallback: number,
+  poolDetail: string,
 ): { status: number; body: { error: unknown } } {
   if (error instanceof UpstreamError && error.kind === "model_not_found") {
     return toOpenAIErrorBody(
@@ -72,7 +79,25 @@ function mapTurnError(
       error.status,
     ) as { status: number; body: { error: unknown } };
   }
+  if (error instanceof AllAccountsFailedError && (isPoolRateLimited(error.failures) || error.failures.length === 0)) {
+    // The pool is drained by quota, or empty (every account in cooldown). A retryable
+    // status kept the client re-issuing — measured at ~0.5s — so the loop never ended. A
+    // 400 it treats as final is what makes it stop. A pool that failed on a real transient
+    // (all `server_error`) is NOT this case and keeps its 503.
+    return toOpenAIErrorBody(new Error(poolDetail), 400) as { status: number; body: { error: unknown } };
+  }
   return toOpenAIErrorBody(error, fallback) as { status: number; body: { error: unknown } };
+}
+
+/**
+ * The message a drained or empty pool answers with, and that the request logs — the same
+ * text in both places so the terminal explains the client's error without a second lookup.
+ */
+function poolDetailMessage(model: string, soonestCooldownUntil: number | null): string {
+  const reset = toResetPhrase(soonestCooldownUntil);
+  return reset
+    ? t("chat.poolEmpty", { model, reset })
+    : t("chat.poolEmptyNoReset", { model });
 }
 
 /**
@@ -186,13 +211,15 @@ export async function chatRoutes(
         );
         reply.status(200).send(buildCompletion(result, body.model));
       } catch (error) {
-        const mapped = mapTurnError(error, body.model, error instanceof AllAccountsFailedError ? 503 : 502);
+        const poolDetail = poolDetailMessage(body.model, accounts.poolSummary().soonestCooldownUntil);
+        const mapped = mapTurnError(error, body.model, error instanceof AllAccountsFailedError ? 503 : 502, poolDetail);
         log.warn(
           {
             model: body.model,
             runtimeModel,
             status: mapped.status,
             kind: error instanceof UpstreamError ? error.kind : "pool",
+            detail: (mapped.body.error as { message?: string }).message,
             elapsedMs: Date.now() - requestStart,
           },
           "chat failed",
@@ -259,13 +286,15 @@ export async function chatRoutes(
         "chat completed",
       );
     } catch (error) {
-      const mapped = mapTurnError(error, body.model, error instanceof AllAccountsFailedError ? 503 : 502);
+      const poolDetail = poolDetailMessage(body.model, accounts.poolSummary().soonestCooldownUntil);
+      const mapped = mapTurnError(error, body.model, error instanceof AllAccountsFailedError ? 503 : 502, poolDetail);
       log.warn(
         {
           model: body.model,
           runtimeModel,
           status: mapped.status,
           kind: error instanceof UpstreamError ? error.kind : "pool",
+          detail: (mapped.body.error as { message?: string }).message,
           headersSent: started,
           elapsedMs: Date.now() - requestStart,
         },

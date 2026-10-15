@@ -64,6 +64,25 @@ export class AccountService {
     return order(this.deps.store.snapshot(), runtimeModel, this.now());
   }
 
+  /**
+   * A one-line view of why the pool offered nothing: how many accounts are enabled and how
+   * many are benched, with the soonest moment any of them is eligible again. Lets a caller
+   * say "the pool is out of quota, it clears in ~X" instead of a generic "no account".
+   */
+  poolSummary(): { enabled: number; cooling: number; soonestCooldownUntil: number | null } {
+    const now = this.now();
+    const accounts = this.deps.store.listAccounts();
+    const enabled = accounts.filter((account) => account.enabled).length;
+    const cooldowns = accounts
+      .filter((account) => account.enabled && account.cooldownUntil !== null && account.cooldownUntil > now)
+      .map((account) => account.cooldownUntil as number);
+    return {
+      enabled,
+      cooling: cooldowns.length,
+      soonestCooldownUntil: cooldowns.length > 0 ? Math.min(...cooldowns) : null,
+    };
+  }
+
   markUsed(id: string): void {
     this.deps.store.touch(id);
   }

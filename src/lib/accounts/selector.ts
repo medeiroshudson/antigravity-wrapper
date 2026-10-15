@@ -37,7 +37,9 @@ export function summarizeQuota(account: AccountSnapshot, runtimeModel: string): 
  * Rules (spec §8):
  *  1. only enabled, non-invalid accounts; an expired cooldown becomes valid again
  *     — a cooldown without `cooldownUntil` is treated as already over (eligible),
- *       since discarding it would silently and permanently lose the account
+ *       since discarding it would silently and permanently lose the account. An active
+ *       cooldown only benches the account for the model family that drained: a family with
+ *       quota left keeps it eligible (the wall is per family, the cooldown is per account)
  *  2. explicit priority comes before quota
  *  3. known quota before unknown quota — unknown is NEUTRAL,
  *     neither zero (would exclude a new account) nor full (would always be preferred);
@@ -55,7 +57,13 @@ export function order(
     if (account.status === "cooldown") {
       // With no expiry recorded, the cooldown is considered over: keeping the
       // account ineligible forever would be a silent, permanent loss.
-      return account.cooldownUntil === null || account.cooldownUntil <= now;
+      if (account.cooldownUntil === null || account.cooldownUntil <= now) return true;
+      // A quota wall is per model family, but the cooldown is stored on the account. Keep
+      // the account for a family that still has quota, so a drained Claude quota does not
+      // also bench a fully-stocked Gemini quota. Unmeasured quota for the family (null)
+      // stays benched: it is not evidence of room.
+      const quota = summarizeQuota(account, runtimeModel);
+      return quota !== null && quota > 0;
     }
     return true;
   });

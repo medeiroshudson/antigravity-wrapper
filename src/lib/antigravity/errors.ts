@@ -41,20 +41,43 @@ export function isDefinitive(kind: UpstreamFailureKind): boolean {
   return DEFINITIVE_KINDS.has(kind);
 }
 
-/** "Resets in 2h 30m" / "Resets in 45m" / "Resets in 30s" -> milliseconds. */
-function parseResetHint(body: string): number | null {
-  const match = /Resets?\s+in\s+([^.\n]+)/i.exec(body);
-  const fragment = match?.[1];
-  if (!fragment) return null;
+/**
+ * True when every account failed on a rate limit or a quota wall. There is nothing to fail
+ * over to — the whole pool is out of quota — so the caller must receive a 429 it can back
+ * off from, not a 503 `server_error` it will retry immediately (which is what turned a
+ * drained Opus quota into an endless retry loop on the client side).
+ */
+export function isPoolRateLimited(failures: ReadonlyArray<{ kind: string }>): boolean {
+  return (
+    failures.length > 0 &&
+    failures.every((failure) => failure.kind === "quota" || failure.kind === "transient_rate_limit")
+  );
+}
+
+/** "2h 30m" / "45m" / "3h52m46.163670559s" -> milliseconds, or null when nothing parses. */
+function parseDurationFragment(fragment: string): number | null {
   let totalMs = 0;
   let matched = false;
   const hours = /(\d+)\s*h/i.exec(fragment);
   const minutes = /(\d+)\s*m(?!s)/i.exec(fragment);
-  const seconds = /(\d+)\s*s/i.exec(fragment);
+  const seconds = /(\d+(?:\.\d+)?)\s*s/i.exec(fragment);
   if (hours) { totalMs += Number(hours[1]) * 3_600_000; matched = true; }
   if (minutes) { totalMs += Number(minutes[1]) * 60_000; matched = true; }
-  if (seconds) { totalMs += Number(seconds[1]) * 1_000; matched = true; }
+  if (seconds) { totalMs += Math.round(Number(seconds[1]) * 1_000); matched = true; }
   return matched ? totalMs : null;
+}
+
+/**
+ * "Resets in 2h 30m" / "Resets in 45m" / "reset after 4h46m21s" -> milliseconds.
+ *
+ * The backend uses two wordings: "Resets in <duration>" and "reset after <duration>".
+ * Missing the second one classified a multi-hour quota wall as a transient throttle, so
+ * nothing cooled the account and every request hammered the exhausted pool (measured).
+ */
+function parseResetHint(body: string): number | null {
+  const match = /Resets?\s+in\s+([^.\n]+)/i.exec(body) ?? /reset\s+after\s+([^.\n]+)/i.exec(body);
+  const fragment = match?.[1];
+  return fragment ? parseDurationFragment(fragment) : null;
 }
 
 /**
@@ -75,11 +98,47 @@ function messageOf(body: string): string {
   return body;
 }
 
+/**
+ * The reset the backend states in a structured field, which is more durable than the
+ * wording around it. A 429 carries either a `RetryInfo.retryDelay` in whole seconds
+ * (e.g. "13966.163670559s") or an `ErrorInfo` `quotaResetDelay` (e.g. "3h52m46s"). It is
+ * this signal — not the message text — that survives a backend that phrases the same wall
+ * differently per endpoint.
+ */
+function parseStructuredReset(body: string): number | null {
+  let parsed: { error?: { details?: unknown } };
+  try {
+    parsed = JSON.parse(body) as typeof parsed;
+  } catch {
+    return null;
+  }
+  const details = parsed.error?.details;
+  if (!Array.isArray(details)) return null;
+  for (const detail of details) {
+    if (typeof detail !== "object" || detail === null) continue;
+    const record = detail as Record<string, unknown>;
+    if (typeof record.retryDelay === "string") {
+      const seconds = Number.parseFloat(record.retryDelay);
+      if (Number.isFinite(seconds) && seconds > 0) return Math.round(seconds * 1000);
+    }
+    const metadata = record.metadata;
+    if (typeof metadata === "object" && metadata !== null) {
+      const quotaResetDelay = (metadata as Record<string, unknown>).quotaResetDelay;
+      if (typeof quotaResetDelay === "string") {
+        const fromDescriptor = parseDurationFragment(quotaResetDelay);
+        if (fromDescriptor !== null) return fromDescriptor;
+      }
+    }
+  }
+  return null;
+}
+
 export function classifyUpstream(status: number, body: string): UpstreamError {
   const text = messageOf(body);
 
   if (status === 429) {
-    const retryAfterMs = parseResetHint(body);
+    // The structured delay is authoritative; the message wording is only a fallback.
+    const retryAfterMs = parseStructuredReset(body) ?? parseResetHint(body);
     // A real quota wall carries a long "Resets in …"; a short window is just
     // throttling. Without the hint, the backend uses RESOURCE_EXHAUSTED for
     // transient throttling too, which deserves a retry.

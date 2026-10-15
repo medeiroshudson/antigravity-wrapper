@@ -123,6 +123,52 @@ describe("order", () => {
     expect(result.map((a) => a.id)).toEqual(["no-expiry"]);
   });
 
+  it("keeps a cooling account eligible for a family it still has quota in", () => {
+    // Measured: a quota wall is per model family (gemini-* vs 3p-*), but the cooldown is
+    // stored on the account. Benching the whole account for a drained Claude quota took a
+    // fully-stocked Gemini quota out of service with it.
+    const result = order(
+      [
+        account({
+          id: "cooling",
+          status: "cooldown",
+          cooldownUntil: NOW + 1000,
+          quota: [bucket("3p-5h", 0), bucket("gemini-5h", 1)],
+        }),
+      ],
+      "gemini-3.8-flash-high",
+      NOW,
+    );
+    expect(result.map((a) => a.id)).toEqual(["cooling"]);
+  });
+
+  it("still discards a cooling account for the family that drained", () => {
+    const result = order(
+      [
+        account({
+          id: "cooling",
+          status: "cooldown",
+          cooldownUntil: NOW + 1000,
+          quota: [bucket("3p-5h", 0), bucket("gemini-5h", 1)],
+        }),
+      ],
+      "claude-opus-4-6-thinking",
+      NOW,
+    );
+    expect(result.map((a) => a.id)).toEqual([]);
+  });
+
+  it("discards a cooling account when the requested family has no measured quota", () => {
+    // No buckets for the family means the quota cannot be confirmed, so a cooling account
+    // stays benched rather than being tried blind.
+    const result = order(
+      [account({ id: "cooling", status: "cooldown", cooldownUntil: NOW + 1000, quota: [bucket("3p-5h", 1)] })],
+      "gemini-3.8-flash-high",
+      NOW,
+    );
+    expect(result.map((a) => a.id)).toEqual([]);
+  });
+
   it("orders by remaining quota descending", () => {
     const result = order(
       [

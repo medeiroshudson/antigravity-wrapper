@@ -55,6 +55,54 @@ describe("classifyUpstream", () => {
     expect(classifyUpstream(503, "{}").kind).toBe("server_error");
   });
 
+  it("treats 'reset after <duration>' as a quota wall, not transient throttling", () => {
+    // Measured live: the backend names the reset as "reset after 4h46m21s", which the
+    // "Resets in …" hint does not match. The wall was then classified as a transient
+    // throttle, so nothing cooled the account down and every request hammered the pool.
+    const wall = classifyUpstream(
+      429,
+      '{"error":{"message":"You have exhausted your capacity on this model. Your quota will reset after 4h46m21s."}}',
+    );
+    expect(wall.kind).toBe("quota");
+    expect(wall.retryAfterMs).toBe(4 * 3_600_000 + 46 * 60_000 + 21_000);
+  });
+
+  it("still treats a short 'reset after' window as transient throttling", () => {
+    const throttled = classifyUpstream(
+      429,
+      '{"error":{"message":"Rate exceeded. Your quota will reset after 30s."}}',
+    );
+    expect(throttled.kind).toBe("transient_rate_limit");
+  });
+
+  it("treats the bare 'Resource has been exhausted' with no reset as transient throttling", () => {
+    const err = classifyUpstream(429, '{"error":{"message":"Resource has been exhausted (e.g. check quota)."}}');
+    expect(err.kind).toBe("transient_rate_limit");
+  });
+
+  it("reads the structured retryDelay when the backend provides one", () => {
+    // Measured live: the informative 429 carries a machine-readable RetryInfo, which is a
+    // far more durable signal than the wording of the message around it.
+    const body = JSON.stringify({
+      error: {
+        code: 429,
+        message: "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 3h52m46s.",
+        status: "RESOURCE_EXHAUSTED",
+        details: [
+          {
+            "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+            reason: "QUOTA_EXHAUSTED",
+            metadata: { quotaResetDelay: "3h52m46.163670559s" },
+          },
+          { "@type": "type.googleapis.com/google.rpc.RetryInfo", retryDelay: "13966.163670559s" },
+        ],
+      },
+    });
+    const err = classifyUpstream(429, body);
+    expect(err.kind).toBe("quota");
+    expect(err.retryAfterMs).toBe(13966164);
+  });
+
   it("does not leak the token in the message", () => {
     const err = classifyUpstream(401, '{"error":{"message":"bad token ya29.SYNTHETICVALUE000"}}');
     expect(err.message).not.toContain("ya29.SYNTHETIC");

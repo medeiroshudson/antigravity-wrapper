@@ -52,6 +52,10 @@ const enUS = {
   // --- chat route ----------------------------------------------------------
   "chat.modelNotFound": "Model '{model}' not found",
   "chat.modelRejected": "Model '{model}' was rejected upstream: {detail}",
+  "chat.poolEmpty":
+    "Model '{model}' is unavailable: the account pool is out of quota for it. It clears in ~{reset}. Try another model.",
+  "chat.poolEmptyNoReset":
+    "Model '{model}' is unavailable: no account in the pool can serve it. Try another model.",
   "chat.messagesEmpty": "toContents expects a non-empty list of messages",
   "chat.accountWithoutProjectId": "account has no projectId",
   "chat.streamWithoutFinishReason": "stream ended without finishReason",

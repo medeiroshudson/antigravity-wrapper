@@ -25,7 +25,9 @@ export interface TurnOutcome {
 
 export class AllAccountsFailedError extends Error {
   override name = "AllAccountsFailedError";
-  constructor(readonly failures: Array<{ accountId: string; kind: string; message: string }>) {
+  constructor(
+    readonly failures: Array<{ accountId: string; kind: string; message: string; retryAfterMs?: number | null }>,
+  ) {
     super(
       failures.length === 0
         ? t("account.noEligible")
@@ -87,7 +89,7 @@ export class TurnRunner {
     const candidates = await this.deps.accounts.orderFor(input.runtimeModel);
     const limit = getMaxFailoverAttempts(this.deps.env);
     const backoffMs = getTransientRetryBackoffMs(this.deps.env);
-    const failures: Array<{ accountId: string; kind: string; message: string }> = [];
+    const failures: Array<{ accountId: string; kind: string; message: string; retryAfterMs?: number | null }> = [];
     this.logger.debug(
       { runtimeModel: input.runtimeModel, candidates: candidates.map((c) => c.id), limit },
       "turn candidates",
@@ -169,7 +171,12 @@ export class TurnRunner {
           if (error.status === 429) {
             void this.deps.accounts.refreshQuota(candidate.id).catch(() => undefined);
           }
-          failures.push({ accountId: candidate.id, kind: error.kind, message: error.message });
+          failures.push({
+            accountId: candidate.id,
+            kind: error.kind,
+            message: error.message,
+            retryAfterMs: error.retryAfterMs,
+          });
           break;
         }
       }

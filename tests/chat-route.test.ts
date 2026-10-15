@@ -113,7 +113,9 @@ describe("POST /v1/chat/completions", () => {
     expect(response.statusCode).toBe(404);
   });
 
-  it("returns 503 when the pool is empty", async () => {
+  it("returns a non-retryable 400 when the pool is empty", async () => {
+    // An empty pool (every account removed, or all in cooldown) is not a transient server
+    // fault: a retryable 503 kept the client re-issuing forever. 400 makes it stop.
     store.removeAccount("a1");
     app = buildServer("test-key", { store, env: ENV, fetchImpl: fetchOk(), logger: false });
     const response = await app.inject({
@@ -122,8 +124,8 @@ describe("POST /v1/chat/completions", () => {
       headers: auth,
       payload: { model: "gemini-3.8-flash", messages: [{ role: "user", content: "oi" }] },
     });
-    expect(response.statusCode).toBe(503);
-    expect(response.json().error.message).toMatch(/no eligible account/i);
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.message).toMatch(/no account in the pool can serve it/i);
   });
 
   it("returns 400 when messages is empty", async () => {
@@ -492,7 +494,7 @@ describe("a model the upstream rejects", () => {
     expect(body.error.message).not.toContain("All accounts failed");
   });
 
-  it("still reports a pool-wide throttling as an account failure", async () => {
+  it("reports a pool drained by a quota wall as a non-retryable 400, not a 429 or 503", async () => {
     applyCatalog(CATALOG);
     const fetchImpl = vi.fn(
       async () => new Response('{"error":{"message":"Quota exceeded. Resets in 1h."}}', { status: 429 }),
@@ -506,9 +508,57 @@ describe("a model the upstream rejects", () => {
       headers: auth,
       payload: { model: "gemini-3.8-flash", stream: false, messages: [{ role: "user", content: "hi" }] },
     });
+    const body = response.json() as { error: { type: string; message: string } };
 
-    // The account-level path is unchanged: a quota wall is still the pool's problem.
-    expect(response.statusCode).toBe(503);
+    // Measured: a drained pool that answered 429 kept the client re-issuing every ~0.5s
+    // while stuck in "thinking" -- a retryable status never ends the loop. A 400 the client
+    // treats as final is what makes it give up and surface the message instead.
+    expect(response.statusCode).toBe(400);
+    expect(body.error.type).toBe("invalid_request_error");
+    expect(body.error.message).toContain("gemini-3.8-flash");
+  });
+
+  it("reports a pool drained by rate limits as a non-retryable 400", async () => {
+    applyCatalog(CATALOG);
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          '{"error":{"message":"You have exhausted your capacity on this model. Your quota will reset after 4h46m21s."}}',
+          { status: 429 },
+        ),
+    ) as unknown as typeof fetch;
+    app = buildServer("test-key", { store, env: ENV, fetchImpl, logger: false });
+    seed();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: { model: "gemini-3.8-flash", stream: false, messages: [{ role: "user", content: "hi" }] },
+    });
+    const body = response.json() as { error: { type: string; message: string } };
+
+    expect(response.statusCode).toBe(400);
+    expect(body.error.type).toBe("invalid_request_error");
+    expect(body.error.message).toContain("gemini-3.8-flash");
+  });
+
+  it("reports the terse 'no reset named' drain as a non-retryable 400 too", async () => {
+    applyCatalog(CATALOG);
+    const fetchImpl = vi.fn(
+      async () => new Response('{"error":{"message":"Resource has been exhausted (e.g. check quota)."}}', { status: 429 }),
+    ) as unknown as typeof fetch;
+    app = buildServer("test-key", { store, env: ENV, fetchImpl, logger: false });
+    seed();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: { model: "gemini-3.8-flash", stream: false, messages: [{ role: "user", content: "hi" }] },
+    });
+
+    expect(response.statusCode).toBe(400);
   });
 
   it("reports a rejected request as 400, not as a missing model", async () => {
