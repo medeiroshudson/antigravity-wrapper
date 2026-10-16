@@ -141,6 +141,34 @@ describe("TurnRunner", () => {
     expect(accounts.applyFailure).not.toHaveBeenCalled();
   });
 
+  it("an abort during the transient backoff never issues the retry", async () => {
+    // The window between attempts: the client is already gone, so the retry would be a
+    // full upstream turn spent on a dead request.
+    const controller = new AbortController();
+    let calls = 0;
+    const fetchImpl = vi.fn(async () => {
+      calls += 1;
+      // Throttle the first attempt, then let the runner enter its backoff sleep.
+      if (calls === 1) {
+        controller.abort();
+        return new Response('{"error":{"message":"Resource has been exhausted (e.g. check quota)."}}', {
+          status: 429,
+        });
+      }
+      return sse(TEXT_SSE);
+    }) as unknown as typeof fetch;
+    const runner = new TurnRunner({
+      accounts: service([snapshot("a1")]),
+      fetchImpl,
+      env: { TRANSIENT_RETRY_BACKOFF_MS: "80" },
+    });
+
+    const error = await runner.run(BASE, { signal: controller.signal }).catch((e) => e);
+
+    expect(error).toBeInstanceOf(ClientDisconnectedError);
+    expect(calls).toBe(1);
+  });
+
   it("fails over to the next account when the first returns a 429 quota", async () => {
     // `streamGenerate` tries the three endpoints per account: the fake transport must
     // reject the ENTIRE first account (all endpoints) and only then accept the

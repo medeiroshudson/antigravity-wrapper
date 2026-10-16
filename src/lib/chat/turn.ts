@@ -109,6 +109,10 @@ export class TurnRunner {
       // moves on: the account is healthy and its quota intact, so switching away
       // would spend the next account on a problem the first one does not have.
       for (let attempt = 0; ; attempt += 1) {
+        // A client that already left cannot be served: check before every attempt, or
+        // the transient backoff and the account switch would spend full upstream turns
+        // on a dead request.
+        if (opts.signal?.aborted) throw new ClientDisconnectedError();
         try {
           this.logger.debug({ accountId: candidate.id, attempt }, "account attempt");
           const fresh = await this.deps.accounts.ensureFresh(candidate);
