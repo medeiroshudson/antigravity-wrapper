@@ -160,7 +160,10 @@ export function toOpenAIErrorBody(
   // sobreviver a traducao: o fallback descreve a falha do proprio wrapper (502 = transporte
   // ou inicializacao), entao deixa-lo vencer achatava um 429 em 502. Um 5xx do upstream
   // mantem o fallback, que e como o wrapper reporta um upstream indisponivel.
-  const finalStatus = detected !== null && detected >= 400 && detected < 500 ? detected : status;
+  // Um fallback fora de [100,599] nunca chega ao reply: o Fastify o rejeita
+  // (FST_ERR_BAD_STATUS_CODE, medido 2026-10-16) e o erro vira 500 no handler.
+  const fallback = status >= 100 && status <= 599 ? status : 500;
+  const finalStatus = detected !== null && detected >= 400 && detected < 500 ? detected : fallback;
 
   const error: OpenAIErrorBody =
     finalStatus === 400 || finalStatus === 422

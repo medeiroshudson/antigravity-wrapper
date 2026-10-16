@@ -4,7 +4,7 @@ import { getPublicModels, normalizeEffort, resolveRuntimeModel } from "../config
 import { t } from "../i18n/index.js";
 import type { AccountStore } from "../lib/accounts/store.js";
 import { AccountService } from "../lib/accounts/service.js";
-import { isDefinitive, isPoolRateLimited, UpstreamError } from "../lib/antigravity/errors.js";
+import { ClientDisconnectedError, isDefinitive, isPoolRateLimited, UpstreamError } from "../lib/antigravity/errors.js";
 import { AllAccountsFailedError, TurnRunner } from "../lib/chat/turn.js";
 import { toResetPhrase } from "../lib/format/datetime.js";
 import { toContents, type ChatMessage } from "../lib/chat/compose.js";
@@ -74,9 +74,13 @@ function mapTurnError(
     ) as { status: number; body: { error: unknown } };
   }
   if (error instanceof UpstreamError && isDefinitive(error.kind)) {
+    // A definitive error carries its own status — but only when it is a real HTTP code:
+    // the abort sites used to send 0, which Fastify rejects (FST_ERR_BAD_STATUS_CODE)
+    // and turns into a 500 in the error handler.
+    const status = error.status >= 400 && error.status <= 599 ? error.status : 502;
     return toOpenAIErrorBody(
       new Error(t("chat.modelRejected", { model, detail: error.message })),
-      error.status,
+      status,
     ) as { status: number; body: { error: unknown } };
   }
   if (error instanceof AllAccountsFailedError && (isPoolRateLimited(error.failures) || error.failures.length === 0)) {
@@ -215,6 +219,19 @@ export async function chatRoutes(
         );
         reply.status(200).send(buildCompletion(result, body.model));
       } catch (error) {
+        // The client's own verdict: log it as an abort and answer 499 best-effort — the
+        // socket may already be gone, and relaying any upstream-style failure (the old
+        // status-0 client_error) is what crashed the reply (measured, 2026-10-16).
+        if (error instanceof ClientDisconnectedError) {
+          log.info(
+            { model: body.model, runtimeModel, stream: false, elapsedMs: Date.now() - requestStart },
+            "client disconnected",
+          );
+          if (!reply.raw.destroyed) {
+            reply.status(499).send(toOpenAIErrorBody(error, 499).body);
+          }
+          return;
+        }
         const poolDetail = poolDetailMessage(body.model, accounts.poolSummary().soonestCooldownUntil);
         const mapped = mapTurnError(error, body.model, error instanceof AllAccountsFailedError ? 503 : 502, poolDetail);
         log.warn(
@@ -253,7 +270,9 @@ export async function chatRoutes(
       const { result, accountId } = await runner.run(turnInput, {
         signal: disconnect.signal,
         onDelta: (text) => {
-          if (disconnect.signal.aborted || reply.raw.destroyed) throw new Error(t("chat.clientDisconnected"));
+          if (disconnect.signal.aborted || reply.raw.destroyed) {
+            throw new ClientDisconnectedError(t("chat.clientDisconnected"));
+          }
           writeChunk({ content: text }, null);
         },
       });
@@ -290,6 +309,22 @@ export async function chatRoutes(
         "chat completed",
       );
     } catch (error) {
+      // The client's own verdict mid-stream: the socket is gone, so there is nobody to
+      // tell. Log the abort and let the finally end the (dead) response — writing an
+      // error frame here would go nowhere (measured, 2026-10-16).
+      if (error instanceof ClientDisconnectedError) {
+        log.info(
+          {
+            model: body.model,
+            runtimeModel,
+            stream: true,
+            elapsedMs: Date.now() - requestStart,
+            headersSent: started,
+          },
+          "client disconnected",
+        );
+        return;
+      }
       const poolDetail = poolDetailMessage(body.model, accounts.poolSummary().soonestCooldownUntil);
       const mapped = mapTurnError(error, body.model, error instanceof AllAccountsFailedError ? 503 : 502, poolDetail);
       log.warn(

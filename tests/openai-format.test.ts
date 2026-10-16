@@ -88,6 +88,17 @@ describe("toOpenAIErrorBody", () => {
     expect(toOpenAIErrorBody(new Error("x"), 502).status).toBe(502);
   });
 
+  it("never hands an invalid status to the reply", () => {
+    // Measured (2026-10-16): an upstream error carried status 0 through to
+    // reply.status(0), which Fastify rejects with FST_ERR_BAD_STATUS_CODE and turns
+    // into a 500 in the error handler. A detected status that is not a real 4xx is
+    // ignored (the fallback wins), and an invalid fallback becomes 500.
+    expect(toOpenAIErrorBody(Object.assign(new Error("x"), { status: 0 }), 502).status).toBe(502);
+    expect(toOpenAIErrorBody(Object.assign(new Error("x"), { status: 42 }), 502).status).toBe(502);
+    expect(toOpenAIErrorBody(new Error("x"), 0).status).toBe(500);
+    expect(toOpenAIErrorBody(new Error("x"), -1).status).toBe(500);
+  });
+
   it("marks 400 as invalid_request_error", () => {
     const mapped = toOpenAIErrorBody(new Error("bad"), 400);
     expect(mapped.status).toBe(400);

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import http from "node:http";
 import type { FastifyInstance, FastifyServerOptions } from "fastify";
 import { buildServer } from "../src/server.js";
 import { AccountStore } from "../src/lib/accounts/store.js";
@@ -455,6 +456,79 @@ describe("POST /v1/chat/completions over real HTTP", () => {
     expect(response.status).toBe(200);
     const body = (await response.json()) as { choices: Array<{ message: { content: string } }> };
     expect(body.choices[0]?.message.content).toBe("ola");
+  });
+
+  it("a disconnect during the upstream turn logs an abort, not a crash", async () => {
+    // The incident (2026-10-16 15:06): the client hung up mid-retry, the abort became a
+    // status-0 client_error and the route called reply.status(0) -> FST_ERR_BAD_STATUS_CODE
+    // -> 500. Here the socket is real and the fetch honors the signal, like the native one.
+    const { logger, entries } = captureFastifyLog();
+    const signalSeen = new Promise<AbortSignal>((resolve) => {
+      let settled = false;
+      const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+        const signal = init?.signal;
+        if (signal && !settled) {
+          settled = true;
+          resolve(signal);
+        }
+        // Hold the request open until the client's disconnect aborts it.
+        return new Promise<Response>((_resolve, reject) => {
+          if (signal?.aborted) {
+            reject(new DOMException("aborted", "AbortError"));
+            return;
+          }
+          signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+        });
+      }) as unknown as typeof fetch;
+      app = buildServer("test-key", { store, env: ENV, fetchImpl, logger });
+    });
+    await app.listen({ port: 0, host: "127.0.0.1" });
+    const address = app.server.address();
+    if (!address || typeof address === "string") throw new Error("no ephemeral port");
+    const port = address.port;
+
+    // A raw socket, killed mid-turn: the closest shape to the incident's vanished client.
+    const payload = JSON.stringify({
+      stream: false,
+      model: "gemini-3.8-flash",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port,
+        method: "POST",
+        path: "/v1/chat/completions",
+        headers: { ...auth, "content-type": "application/json", "content-length": String(payload.length) },
+      },
+      () => undefined,
+    );
+    // req.destroy() surfaces as ECONNRESET on this side: expected, not a failure.
+    req.on("error", () => undefined);
+    req.write(payload);
+    req.end();
+    const upstreamSignal = await signalSeen;
+    const upstreamAborted = new Promise<void>((resolve) => {
+      if (upstreamSignal.aborted) resolve();
+      else upstreamSignal.addEventListener("abort", () => resolve(), { once: true });
+    });
+    // Kill the socket the way a vanished client does: raw TCP death, not a graceful
+    // end. Aborting an undici fetch instead surfaces an internal unhandled rejection.
+    req.destroy();
+    await upstreamAborted;
+
+    // The handler runs after the socket is gone; wait for its verdict to hit the log,
+    // then require an abort line — never the request-failed 500 the status-0 path produced.
+    const deadline = Date.now() + 2_000;
+    let logs: Array<Record<string, unknown>> = [];
+    while (Date.now() < deadline) {
+      logs = entries();
+      if (logs.some((e) => e.msg === "client disconnected") || logs.some((e) => e.msg === "request failed")) break;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    expect(logs.filter((e) => e.msg === "request failed")).toHaveLength(0);
+    expect(logs.filter((e) => e.msg === "chat failed")).toHaveLength(0);
+    expect(logs.filter((e) => e.msg === "client disconnected")).toHaveLength(1);
   });
 });
 
