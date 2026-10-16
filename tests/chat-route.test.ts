@@ -616,6 +616,42 @@ describe("the stream flush patience", () => {
     app.server.closeAllConnections();
   });
 
+  it("flushes via the timer when the patience is positive, not just at zero", async () => {
+    // The default path: a nonzero patience arms a timer. This is the branch the 0-ms
+    // test cannot reach, and the one the incident actually needed (the client waits
+    // out the retry ladder with the head on the wire).
+    const fetchImpl = vi.fn(async () => new Promise<Response>(() => undefined)) as unknown as typeof fetch;
+    app = buildServer("test-key", {
+      store,
+      env: { ...ENV, STREAM_FLUSH_PATIENCE_MS: "50" },
+      fetchImpl,
+      logger: false,
+    });
+    await app.listen({ port: 0, host: "127.0.0.1" });
+    const address = app.server.address();
+    if (!address || typeof address === "string") throw new Error("no ephemeral port");
+    const port = address.port;
+
+    const response = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+      method: "POST",
+      headers: { ...auth, "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gemini-3.8-flash",
+        stream: true,
+        messages: [{ role: "user", content: "oi" }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    const firstFrame = (await response.body!.getReader().read()).value;
+    const parsed = JSON.parse(new TextDecoder().decode(firstFrame).replace(/^data: /, "").trim()) as {
+      choices: Array<{ delta: { role?: string; content?: string } }>;
+    };
+    expect(parsed.choices[0]?.delta).toEqual({ role: "assistant", content: "" });
+    await response.body!.cancel().catch(() => undefined);
+    app.server.closeAllConnections();
+  });
+
   it("a slow pre-content failure arrives as an error frame with [DONE], not a hung stream", async () => {
     const rejected = vi.fn(
       async () => new Response('{"error":{"message":"Quota reached. Resets in 1h."}}', { status: 429 }),
