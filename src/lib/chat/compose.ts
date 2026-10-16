@@ -1,5 +1,6 @@
 import { t } from "../../i18n/index.js";
 import type { GeminiContent, GeminiPart } from "../antigravity/envelope.js";
+import { recallSignature } from "./signatures.js";
 
 export interface ChatToolCall {
   id?: string;
@@ -57,8 +58,18 @@ function pushTurn(contents: GeminiContent[], role: "user" | "model", parts: Gemi
  * A tool-result turn becomes a `functionResponse` in a user turn, and the
  * Gemini `thoughtSignature` is preserved because without it the backend
  * rejects multi-turn continuity.
+ *
+ * `strictThoughtSignatures` (native Gemini path): a tool call the wrapper cannot sign —
+ * no client signature and nothing in the bank — is textualized together with its
+ * result, because an unsigned functionCall part makes the upstream reject the whole
+ * request with 400 "missing a thought_signature" (measured). Signature-less calls
+ * happen when the client made them through the 3p bridge (which signs nothing) or
+ * before a server restart emptied the bank.
  */
-export function toContents(messages: ChatMessage[]): {
+export function toContents(
+  messages: ChatMessage[],
+  opts: { strictThoughtSignatures?: boolean } = {},
+): {
   contents: GeminiContent[];
   systemInstruction: string;
 } {
@@ -66,8 +77,27 @@ export function toContents(messages: ChatMessage[]): {
     throw new Error(t("chat.messagesEmpty"));
   }
 
+  const strict = opts.strictThoughtSignatures === true;
   const contents: GeminiContent[] = [];
   const systemParts: string[] = [];
+
+  // The upstream requires functionResponse.name to name the functionCall it answers.
+  // `name` on an OpenAI tool message is optional and clients pair by tool_call_id, so
+  // the authoritative name comes from the paired call; a placeholder ("tool") made the
+  // native Gemini path reject the whole request with a generic 400 (measured).
+  const nameByCallId = new Map<string, string>();
+  for (const message of messages) {
+    if ((message.role ?? "").toLowerCase() !== "assistant") continue;
+    for (const call of message.tool_calls ?? []) {
+      const name = call.function?.name;
+      if (typeof call.id === "string" && call.id && typeof name === "string" && name) {
+        nameByCallId.set(call.id, name);
+      }
+    }
+  }
+  // Calls textualized under `strictThoughtSignatures`; their responses must be
+  // textualized too, or the orphan functionResponse breaks the same rule.
+  const textualized = new Set<string>();
 
   for (const message of messages) {
     const role = (message.role ?? "").toLowerCase();
@@ -85,6 +115,16 @@ export function toContents(messages: ChatMessage[]): {
       for (const call of message.tool_calls ?? []) {
         const name = call.function?.name;
         if (typeof name !== "string" || name.length === 0) continue;
+        // OpenAI clients drop the non-standard thoughtSignature when echoing the
+        // assistant turn back; the wrapper remembers it and reattaches it, because the
+        // upstream rejects an unsigned history (see signatures.ts). The bank is
+        // authoritative over an echo, which a client may have truncated.
+        const signature = (call.id ? recallSignature(call.id) : null) ?? call.thoughtSignature ?? null;
+        if (strict && signature === null) {
+          textualized.add(call.id ?? "");
+          parts.push({ text: `used tool "${name}" with arguments ${call.function?.arguments ?? "{}"}` });
+          continue;
+        }
         const part: GeminiPart = {
           functionCall: {
             name,
@@ -92,8 +132,8 @@ export function toContents(messages: ChatMessage[]): {
             ...(typeof call.id === "string" && call.id ? { id: call.id } : {}),
           },
         };
-        if (typeof call.thoughtSignature === "string" && call.thoughtSignature) {
-          (part as { thoughtSignature?: string }).thoughtSignature = call.thoughtSignature;
+        if (signature !== null) {
+          (part as { thoughtSignature?: string }).thoughtSignature = signature;
         }
         parts.push(part);
       }
@@ -103,7 +143,13 @@ export function toContents(messages: ChatMessage[]): {
 
     if (role === "tool") {
       const text = textOf(message.content);
-      const name = message.name ?? "tool";
+      if (strict && textualized.has(message.tool_call_id ?? "")) {
+        pushTurn(contents, "user", [
+          { text: `tool "${nameByCallId.get(message.tool_call_id ?? "") ?? message.name ?? "tool"}" returned: ${text}` },
+        ]);
+        continue;
+      }
+      const name = nameByCallId.get(message.tool_call_id ?? "") ?? message.name ?? "tool";
       const part: GeminiPart = {
         functionResponse: {
           name,

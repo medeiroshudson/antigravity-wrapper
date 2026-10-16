@@ -8,6 +8,7 @@ import { readSse, streamGenerate } from "../antigravity/rpc.js";
 import type { TurnResult } from "../openai-format/index.js";
 import { noopLogger, type Logger } from "../logger.js";
 import { normalizeToolCalls } from "./tools.js";
+import { rememberSignature } from "./signatures.js";
 
 export interface TurnInput {
   runtimeModel: string;
@@ -305,6 +306,11 @@ export class TurnRunner {
       arguments: call.function?.arguments ?? "{}",
       ...(call.thoughtSignature ? { thoughtSignature: call.thoughtSignature } : {}),
     }));
+    // Remember what the upstream signed before the client can drop it: the next turn's
+    // history must carry these signatures again (see signatures.ts).
+    for (const call of toolCalls) {
+      if (call.id && call.thoughtSignature) rememberSignature(call.id, call.thoughtSignature);
+    }
 
     return {
       content,

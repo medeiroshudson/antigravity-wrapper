@@ -294,6 +294,52 @@ describe("thoughtSignature on the OpenAI surface", () => {
     expect(functionCallPart?.thoughtSignature).toBe("SIG-328chars");
   });
 
+  it("restores the signature server-side when the client drops the non-standard field", async () => {
+    // Claude Code and other OpenAI clients do not echo `thoughtSignature` back: the
+    // wrapper is the stateful party of the loop, so it must remember the signature it
+    // returned and reattach it, or the native Gemini path rejects the next turn with
+    // 400 "missing a thought_signature" (measured with the real client).
+    const { fetchImpl, envelopes } = fetchToolCapture();
+    app = buildServer("test-key", { store, env: ENV, fetchImpl, logger: false });
+
+    // Turn 1: get a signed call.
+    const first = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: {
+        model: "gemini-3.8-flash",
+        messages: [{ role: "user", content: "clima em Paris?" }],
+        tools: [WEATHER_TOOL],
+      },
+    });
+    const call = first.json().choices[0].message.tool_calls[0] as { id: string };
+
+    // Turn 2: the client echoes the call WITHOUT the thoughtSignature field.
+    const second = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: {
+        model: "gemini-3.8-flash",
+        messages: [
+          { role: "user", content: "clima em Paris?" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [{ id: call.id, type: "function", function: { name: "get_weather", arguments: '{"city":"Paris"}' } }],
+          },
+          { role: "tool", tool_call_id: call.id, name: "get_weather", content: '{"temp":20}' },
+        ],
+        tools: [WEATHER_TOOL],
+      },
+    });
+    expect(second.statusCode).toBe(200);
+
+    const functionCallPart = modelParts(envelopes[1]).find((part) => part.functionCall);
+    expect(functionCallPart?.thoughtSignature).toBe("SIG-328chars");
+  });
+
   it("emits the signature in the stream's tool_calls delta", async () => {
     const { fetchImpl } = fetchToolCapture();
     app = buildServer("test-key", { store, env: ENV, fetchImpl, logger: false });

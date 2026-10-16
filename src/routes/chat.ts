@@ -149,7 +149,11 @@ export async function chatRoutes(
     let contents;
     let systemInstruction: string;
     try {
-      ({ contents, systemInstruction } = toContents(body.messages));
+      // Native Gemini rejects an unsigned functionCall history; the 3p bridge does not
+      // care. Strictness only pays where the rule exists.
+      ({ contents, systemInstruction } = toContents(body.messages, {
+        strictThoughtSignatures: runtimeModel.startsWith("gemini-"),
+      }));
     } catch (error) {
       log.warn(
         { model: body.model, err: error instanceof Error ? error.message : String(error) },
