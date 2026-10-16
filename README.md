@@ -752,12 +752,16 @@ curl -s http://127.0.0.1:3000/v1/chat/completions \
 ```
 
 > [!IMPORTANT]
-> **Echo `thoughtSignature` back verbatim.** Gemini tool calls come back with an extra
-> `thoughtSignature` field on each tool call. It is the continuity token for the exchange:
-> re-send the assistant message exactly as you received it, signature included. The
-> wrapper preserves it in both the streaming and non-streaming responses and re-attaches a
-> signature you send back. Omitting it is not corrected for you — the backend is the one
-> that rejects a continuation it cannot verify.
+> **`thoughtSignature` handling is automatic.** Gemini tool calls come back with an extra
+> `thoughtSignature` field on each tool call — the continuity token for the exchange, and
+> the upstream rejects a history whose calls are unsigned. OpenAI-compatible clients drop
+> the field when echoing the assistant turn back, so the wrapper remembers signatures by
+> call id and re-attaches them itself. A call whose signature is unrecoverable — made
+> before a server restart, or through the Claude/GPT bridge, which signs nothing — is
+> downgraded to an equivalent text turn: the conversation keeps working at some fidelity
+> cost. Echoing the assistant message back verbatim, signature included, still helps for
+> calls the bank does not know (after a restart); the bank takes precedence over the echo
+> otherwise.
 
 Tool schemas are encoded per model family, because the backend requires different shapes:
 Gemini receives full JSON Schema, while Claude and GPT-OSS receive the legacy
