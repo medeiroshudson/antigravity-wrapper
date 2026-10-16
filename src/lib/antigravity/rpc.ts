@@ -95,6 +95,11 @@ export async function streamGenerate(
     // reserve's 429 overwrite the primary's 404, reporting a missing model as a rate limit
     // (spec §6.1).
     if (first === null) first = error;
+    // A rate limit belongs to the account/project, not to the channel: measured
+    // (2026-10-16), all three endpoints answered an identical 429 in sequence, ~1s each,
+    // spending the client's patience for nothing. The account-level retry and the failover
+    // to another account are the recovery paths.
+    if (error.kind === "quota" || error.kind === "transient_rate_limit") break;
     // A definitive failure is not repaired by another channel: stop and report it.
     if (isDefinitive(error.kind) || !RETRYABLE_STATUS.has(response.status)) break;
   }

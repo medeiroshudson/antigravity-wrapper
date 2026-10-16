@@ -94,17 +94,38 @@ describe("error attribution across endpoints", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
-  it("still tries the next endpoint when the failure is repairable", async () => {
+  it("stops after a quota wall: no other endpoint shares the account's quota", async () => {
+    // Measured (2026-10-16 15:06): all three endpoints answered an identical 429 in
+    // sequence (~1s each), spending 3s of the client's patience for nothing — the
+    // quota wall belongs to the account/project, not to the channel. The account-level
+    // retry and the failover to another account are the recovery paths.
     const fetchImpl = byEndpoint([exhausted, notFound]);
     await streamGenerate("t", {}, { env: {}, fetchImpl }).catch(() => undefined);
-    // A throttle on the primary is worth a reserve.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops after a transient throttle too: the edge is shared", async () => {
+    const transient = {
+      status: 429,
+      body: '{"error":{"message":"Resource has been exhausted (e.g. check quota)."}}',
+    };
+    const fetchImpl = byEndpoint([transient, notFound]);
+    await streamGenerate("t", {}, { env: {}, fetchImpl }).catch(() => undefined);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("still tries the next endpoint when the failure is repairable", async () => {
+    const unavailable = { status: 503, body: '{"error":{"message":"unavailable"}}' };
+    const fetchImpl = byEndpoint([unavailable, notFound]);
+    await streamGenerate("t", {}, { env: {}, fetchImpl }).catch(() => undefined);
+    // A 5xx on the primary is worth a reserve.
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
   it("keeps the primary's rate limit when a reserve answers 404", async () => {
+    // The ladder no longer walks past a 429, but first-error-wins must survive the
+    // early break: the primary's throttle stays the answer.
     const error = await streamGenerate("t", {}, { env: {}, fetchImpl: byEndpoint([exhausted, notFound]) }).catch((e) => e);
-    // The reverse of the reported case: a reserve's 404 is not more true than the
-    // primary's 429, which is why first-error-wins beats a specificity ranking.
     expect(error.kind).toBe("quota");
     expect(error.status).toBe(429);
   });

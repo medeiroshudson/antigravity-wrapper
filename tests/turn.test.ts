@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from "vitest";
-import { ENDPOINTS } from "../src/config/index.js";
 import { ClientDisconnectedError } from "../src/lib/antigravity/errors.js";
 import { AllAccountsFailedError, TurnRunner } from "../src/lib/chat/turn.js";
 import type { AccountService } from "../src/lib/accounts/service.js";
@@ -332,13 +331,13 @@ describe("TurnRunner", () => {
   });
 
   it("retries the same account once after a transient 429, without cooling it down", async () => {
-    // `streamGenerate` walks every candidate endpoint before giving up on an attempt,
-    // so the fake has to throttle all of them before the account-level retry matters.
-    const endpoints = ENDPOINTS.length;
+    // A 429 no longer walks the endpoint ladder (measured: all three answered an
+    // identical throttle), so one throttled fetch exhausts one attempt and the
+    // account-level retry is the recovery.
     let calls = 0;
     const fetchImpl = vi.fn(async () => {
       calls += 1;
-      return calls <= endpoints
+      return calls === 1
         ? new Response('{"error":{"message":"Resource has been exhausted (e.g. check quota)."}}', {
             status: 429,
           })
@@ -352,7 +351,7 @@ describe("TurnRunner", () => {
     });
     const { accountId, result } = await runner.run(BASE);
     expect(accountId).toBe("a1");
-    expect(calls).toBe(endpoints + 1);
+    expect(calls).toBe(2);
     expect(result.content).toBe("ola");
     // The throttle must not change the account's state (spec §11).
     expect(accounts.applyFailure).not.toHaveBeenCalled();
