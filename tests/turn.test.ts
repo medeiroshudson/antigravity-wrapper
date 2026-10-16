@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ENDPOINTS } from "../src/config/index.js";
+import { ClientDisconnectedError } from "../src/lib/antigravity/errors.js";
 import { AllAccountsFailedError, TurnRunner } from "../src/lib/chat/turn.js";
 import type { AccountService } from "../src/lib/accounts/service.js";
 import type { AccountSnapshot } from "../src/lib/accounts/store.js";
@@ -68,6 +69,15 @@ function truncatedSse(text: string): Response {
   return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
 }
 
+/**
+ * A stream that never delivers data nor closes: the read stays pending until the
+ * caller's signal aborts it, the shape a disconnect takes mid-generation.
+ */
+function silentSse(): Response {
+  const body = new ReadableStream<Uint8Array>({ start() {} });
+  return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+}
+
 function service(accounts: AccountSnapshot[]): AccountService {
   return {
     orderFor: vi.fn(async () => accounts),
@@ -103,6 +113,33 @@ describe("TurnRunner", () => {
     const deltas: string[] = [];
     await runner.run(BASE, { onDelta: (t) => deltas.push(t) });
     expect(deltas).toEqual(["ola"]);
+  });
+
+  it("a client disconnect propagates without burning the next account or the pool", async () => {
+    // Measured (2026-10-16): the abort surfaced as a definitive client_error, so the
+    // runner started the 2nd account on a dead request and the route crashed the reply
+    // with status 0. A disconnect is the client's verdict — nothing may retry it.
+    const controller = new AbortController();
+    const seenBearers: string[] = [];
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+      const auth = String((init?.headers as Record<string, string> | undefined)?.Authorization ?? "");
+      seenBearers.push(auth);
+      // Let the read start before the client vanishes (covers the listener path).
+      await Promise.resolve();
+      controller.abort();
+      return silentSse();
+    }) as unknown as typeof fetch;
+    const accounts = service([snapshot("a1"), snapshot("a2")]);
+    const runner = new TurnRunner({ accounts, fetchImpl });
+
+    const error = await runner.run(BASE, { signal: controller.signal }).catch((e) => e);
+
+    expect(error).toBeInstanceOf(ClientDisconnectedError);
+    expect(error.name).not.toBe("AllAccountsFailedError");
+    // One fetch, one account: the 2nd candidate was never started.
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(seenBearers).toEqual(["Bearer tok-a1"]);
+    expect(accounts.applyFailure).not.toHaveBeenCalled();
   });
 
   it("fails over to the next account when the first returns a 429 quota", async () => {

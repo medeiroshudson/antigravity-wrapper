@@ -3,7 +3,7 @@ import { getMaxOutputTokens, getThinkingConfig, type ReasoningEffort } from "../
 import { t } from "../../i18n/index.js";
 import type { AccountService } from "../accounts/service.js";
 import { buildEnvelope, newRequestIdentity, type GeminiContent } from "../antigravity/envelope.js";
-import { isDefinitive, UpstreamError } from "../antigravity/errors.js";
+import { isDefinitive, ClientDisconnectedError, UpstreamError } from "../antigravity/errors.js";
 import { readSse, streamGenerate } from "../antigravity/rpc.js";
 import type { TurnResult } from "../openai-format/index.js";
 import { noopLogger, type Logger } from "../logger.js";
@@ -278,6 +278,9 @@ export class TurnRunner {
         throw new UpstreamError("server_error", 0, t("chat.streamWithoutFinishReason"));
       }
     } catch (error) {
+      // The client hung up: the caller's verdict is the answer, not a failure to wrap
+      // or fail over (measured: the 2nd account was started on a dead request).
+      if (error instanceof ClientDisconnectedError) throw error;
       // A dropped connection or a stall surfaces as a plain Error from the reader.
       // Classify it here so the runner can act on it: in `stream:false` nothing has
       // reached the client yet, so there is still an account to fail over to.

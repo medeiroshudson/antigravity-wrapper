@@ -1,4 +1,5 @@
 import { redact } from "../../config/index.js";
+import { t } from "../../i18n/index.js";
 
 export type UpstreamFailureKind =
   | "quota"
@@ -20,6 +21,23 @@ export class UpstreamError extends Error {
   ) {
     super(redact(message).slice(0, 500));
     Object.setPrototypeOf(this, UpstreamError.prototype);
+  }
+}
+
+/**
+ * The client hung up before the answer was done. Not an upstream verdict, so it is not
+ * an `UpstreamError`: the pool machinery must not treat it as an account failure (it is
+ * not definitive-failover material either — measured, it burned a failover slot on a
+ * dead request) and the route must not relay its status anywhere Fastify would reject.
+ * `status` 499 (nginx's "client closed request") keeps `detectStatus`-style readers on
+ * a valid HTTP code if the error ever leaks into a generic path.
+ */
+export class ClientDisconnectedError extends Error {
+  override name = "ClientDisconnectedError";
+  readonly status = 499;
+  constructor(message: string = t("upstream.cancelledByClient")) {
+    super(message);
+    Object.setPrototypeOf(this, ClientDisconnectedError.prototype);
   }
 }
 

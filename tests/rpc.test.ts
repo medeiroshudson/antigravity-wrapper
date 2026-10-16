@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { antigravityHeaders, readSse, streamGenerate } from "../src/lib/antigravity/rpc.js";
-import { UpstreamError } from "../src/lib/antigravity/errors.js";
+import { ClientDisconnectedError, UpstreamError } from "../src/lib/antigravity/errors.js";
 import { captureLogger } from "./fixtures/logger.js";
 
 function sseResponse(chunks: string[]): Response {
@@ -164,12 +164,17 @@ describe("streamGenerate timeouts", () => {
     ).rejects.toMatchObject({ kind: "server_error" });
   });
 
-  it("aborts with client_error when the caller's signal cancels", async () => {
+  it("aborts with ClientDisconnectedError when the caller's signal cancels", async () => {
     const controller = new AbortController();
     const pending = streamGenerate("tok", {}, { fetchImpl: hangingFetch(), signal: controller.signal });
     await Promise.resolve();
     controller.abort();
-    await expect(pending).rejects.toMatchObject({ kind: "client_error" });
+    // The abort is the client's verdict, not the upstream's: a distinct class keeps it
+    // out of the definitive-pool machinery (measured: it burned a failover slot and
+    // crashed the reply with status 0).
+    await expect(pending).rejects.toBeInstanceOf(ClientDisconnectedError);
+    await expect(pending).rejects.not.toBeInstanceOf(UpstreamError);
+    await expect(pending).rejects.toMatchObject({ status: 499 });
   });
 });
 
@@ -191,7 +196,7 @@ describe("readSse", () => {
     expect(seen).toHaveLength(1);
   });
 
-  it("ends the read when the signal aborts", async () => {
+  it("ends the read with ClientDisconnectedError when the signal aborts", async () => {
     const response = silentResponse();
     const controller = new AbortController();
     const iterate = (async () => {
@@ -202,7 +207,9 @@ describe("readSse", () => {
     // Let the read start before aborting (covers the listener path).
     await Promise.resolve();
     controller.abort();
-    await expect(iterate).rejects.toBeInstanceOf(UpstreamError);
+    await expect(iterate).rejects.toBeInstanceOf(ClientDisconnectedError);
+    await expect(iterate).rejects.not.toBeInstanceOf(UpstreamError);
+    await expect(iterate).rejects.toMatchObject({ status: 499 });
   });
 
   it("ends with an error when the server goes silent (stall watchdog)", async () => {

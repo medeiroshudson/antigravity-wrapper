@@ -7,7 +7,7 @@ import {
 } from "../../config/index.js";
 import { t } from "../../i18n/index.js";
 import { noopLogger, type Logger } from "../logger.js";
-import { classifyUpstream, isDefinitive, UpstreamError } from "./errors.js";
+import { classifyUpstream, ClientDisconnectedError, isDefinitive, UpstreamError } from "./errors.js";
 
 export function antigravityHeaders(
   token: string,
@@ -63,7 +63,9 @@ export async function streamGenerate(
       });
     } catch (error) {
       if (deps.signal?.aborted) {
-        throw new UpstreamError("client_error", 0, t("upstream.cancelledByClient"));
+        // The client's verdict, not the upstream's: a distinct class keeps it out of the
+        // pool machinery and off any status Fastify would reject.
+        throw new ClientDisconnectedError(t("upstream.cancelledByClient"));
       }
       if (controller.signal.aborted) {
         logger.warn({ endpoint, ms: headerMs }, "upstream no headers");
@@ -151,15 +153,15 @@ export async function* readSse(
   const signal = opts.signal;
   let buffer = "";
 
-  // A client abort is not retried: surfaced as a client error.
+  // A client abort is not retried and not an upstream verdict: surfaced as its own class.
   let onAbort: (() => void) | null = null;
   const abort = signal
     ? new Promise<never>((_, reject) => {
         if (signal.aborted) {
-          reject(new UpstreamError("client_error", 0, t("upstream.readAborted")));
+          reject(new ClientDisconnectedError(t("upstream.readAborted")));
           return;
         }
-        onAbort = () => reject(new UpstreamError("client_error", 0, t("upstream.readAborted")));
+        onAbort = () => reject(new ClientDisconnectedError(t("upstream.readAborted")));
         signal.addEventListener("abort", onAbort, { once: true });
       })
     : null;
