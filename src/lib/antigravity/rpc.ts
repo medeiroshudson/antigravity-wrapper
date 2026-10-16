@@ -79,7 +79,13 @@ export async function streamGenerate(
     const text = await response.text();
     const error = classifyUpstream(response.status, text);
     logger.warn(
-      { endpoint, status: response.status, kind: error.kind, detail: redact(error.message).slice(0, 200) },
+      {
+        endpoint,
+        status: response.status,
+        kind: error.kind,
+        detail: redact(error.message).slice(0, 200),
+        body: redact(text).slice(0, 4000),
+      },
       "upstream rejected",
     );
     // The endpoint list is ordered by priority, so the first answer is the authority and a
