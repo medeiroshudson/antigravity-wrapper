@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { getPublicModels, normalizeEffort, resolveRuntimeModel } from "../config/models.js";
+import { getStreamFlushPatienceMs } from "../config/index.js";
 import { t } from "../i18n/index.js";
 import type { AccountStore } from "../lib/accounts/store.js";
 import { AccountService } from "../lib/accounts/service.js";
@@ -255,12 +256,49 @@ export async function chatRoutes(
     let started = false;
     let roleSent = false;
 
-    const writeChunk = (delta: Record<string, unknown>, finish: string | null): void => {
-      if (!started) {
-        started = true;
-        reply.hijack();
-        reply.raw.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
+    const flushHead = (): void => {
+      if (started) return;
+      started = true;
+      reply.hijack();
+      // x-accel-buffering: proxies buffer SSE by default, which would undo the
+      // point of flushing early.
+      reply.raw.writeHead(200, {
+        "content-type": "text/event-stream",
+        "cache-control": "no-store",
+        "x-accel-buffering": "no",
+      });
+    };
+
+    // The patience hybrid: hold the head for a moment so instant failures (empty pool,
+    // validation) keep their real HTTP status — the answers that end the client's retry
+    // loop (4e93d50) — but stop starving a client whose turn is simply slow: after the
+    // patience the head goes out with the OpenAI-shaped role frame, and a failure that
+    // arrives later becomes an error frame inside the 200.
+    let patienceTimer: ReturnType<typeof setTimeout> | null = null;
+    const cancelPatience = (): void => {
+      if (patienceTimer !== null) {
+        clearTimeout(patienceTimer);
+        patienceTimer = null;
       }
+    };
+    const patienceMs = getStreamFlushPatienceMs(deps.env);
+    if (patienceMs === 0) {
+      flushHead();
+      roleSent = true;
+      reply.raw.write(sseEvent(buildChunk(id, body.model, created, { role: "assistant", content: "" }, null)));
+    } else {
+      patienceTimer = setTimeout(() => {
+        patienceTimer = null;
+        if (disconnect.signal.aborted) return;
+        flushHead();
+        roleSent = true;
+        reply.raw.write(sseEvent(buildChunk(id, body.model, created, { role: "assistant", content: "" }, null)));
+      }, patienceMs);
+    }
+
+    const writeChunk = (delta: Record<string, unknown>, finish: string | null): void => {
+      cancelPatience();
+      flushHead();
       const payload = roleSent ? delta : { role: "assistant", ...delta };
       roleSent = true;
       reply.raw.write(sseEvent(buildChunk(id, body.model, created, payload, finish)));
@@ -350,6 +388,8 @@ export async function chatRoutes(
         return;
       }
     } finally {
+      // A failure that pre-empted the timer must not fire it on a replied response.
+      cancelPatience();
       if (started) reply.raw.end();
     }
   });

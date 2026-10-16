@@ -5,6 +5,7 @@ import {
   getBodyLimitBytes,
   getLogLevel,
   getMaxFailoverAttempts,
+  getStreamFlushPatienceMs,
   getUserAgent,
   maskEmail,
   redact,
@@ -90,6 +91,14 @@ describe("numeric values", () => {
     expect(getMaxFailoverAttempts({ MAX_FAILOVER_ATTEMPTS: "5" })).toBe(5);
     expect(getMaxFailoverAttempts({ MAX_FAILOVER_ATTEMPTS: "zero" })).toBe(3);
     expect(getMaxFailoverAttempts({ MAX_FAILOVER_ATTEMPTS: "0" })).toBe(3);
+  });
+
+  it("parses the stream flush patience, where 0 means flush immediately", () => {
+    expect(getStreamFlushPatienceMs({})).toBe(1500);
+    expect(getStreamFlushPatienceMs({ STREAM_FLUSH_PATIENCE_MS: "0" })).toBe(0);
+    expect(getStreamFlushPatienceMs({ STREAM_FLUSH_PATIENCE_MS: "400" })).toBe(400);
+    expect(getStreamFlushPatienceMs({ STREAM_FLUSH_PATIENCE_MS: "soon" })).toBe(1500);
+    expect(getStreamFlushPatienceMs({ STREAM_FLUSH_PATIENCE_MS: "-5" })).toBe(1500);
   });
 });
 

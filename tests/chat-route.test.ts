@@ -129,6 +129,25 @@ describe("POST /v1/chat/completions", () => {
     expect(response.json().error.message).toMatch(/no account in the pool can serve it/i);
   });
 
+  it("returns a non-retryable 400 when the pool is empty, even for stream:true", async () => {
+    // The 4e93d50 fix: a drained/empty pool must answer a status the client treats as
+    // final. Instant failures still keep real HTTP statuses under the flush patience.
+    store.removeAccount("a1");
+    app = buildServer("test-key", { store, env: ENV, fetchImpl: fetchOk(), logger: false });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: {
+        model: "gemini-3.8-flash",
+        stream: true,
+        messages: [{ role: "user", content: "oi" }],
+      },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.message).toMatch(/no account in the pool can serve it/i);
+  });
+
   it("returns 400 when messages is empty", async () => {
     app = buildServer("test-key", { store, env: ENV, fetchImpl: fetchOk(), logger: false });
     const response = await app.inject({
@@ -529,6 +548,121 @@ describe("POST /v1/chat/completions over real HTTP", () => {
     expect(logs.filter((e) => e.msg === "request failed")).toHaveLength(0);
     expect(logs.filter((e) => e.msg === "chat failed")).toHaveLength(0);
     expect(logs.filter((e) => e.msg === "client disconnected")).toHaveLength(1);
+  });
+});
+
+describe("the stream flush patience", () => {
+  /** Every SSE `data:` frame in the body, parsed. */
+  function frames(body: string): Array<Record<string, unknown>> {
+    return body
+      .split("\n\n")
+      .filter((line) => line.startsWith("data: {"))
+      .map((line) => JSON.parse(line.slice("data: ".length)) as Record<string, unknown>);
+  }
+
+  it("holds the headers back so instant failures keep their real status (stream:true, unknown model)", async () => {
+    app = buildServer("test-key", { store, env: ENV, fetchImpl: fetchOk(), logger: false });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: {
+        model: "does-not-exist",
+        stream: true,
+        messages: [{ role: "user", content: "oi" }],
+      },
+    });
+    expect(response.statusCode).toBe(404);
+  });
+
+  it("flushes the SSE head after the patience so a slow upstream cannot starve the client", async () => {
+    // With patience 0 the head goes out immediately even though the upstream never
+    // answers — proven on a real socket, where the fetch resolves on headers alone.
+    // (app.inject would wait for the whole body, which never arrives.)
+    const fetchImpl = vi.fn(async () => new Promise<Response>(() => undefined)) as unknown as typeof fetch;
+    app = buildServer("test-key", {
+      store,
+      env: { ...ENV, STREAM_FLUSH_PATIENCE_MS: "0" },
+      fetchImpl,
+      logger: false,
+    });
+    await app.listen({ port: 0, host: "127.0.0.1" });
+    const address = app.server.address();
+    if (!address || typeof address === "string") throw new Error("no ephemeral port");
+    const port = address.port;
+
+    const response = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+      method: "POST",
+      headers: { ...auth, "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gemini-3.8-flash",
+        stream: true,
+        messages: [{ role: "user", content: "oi" }],
+      }),
+    });
+
+    // Headers are on the wire while the upstream is still pending.
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    const firstFrame = (await response.body!.getReader().read()).value;
+    const text = new TextDecoder().decode(firstFrame);
+    const parsed = JSON.parse(text.replace(/^data: /, "").trim()) as {
+      choices: Array<{ delta: { role?: string; content?: string } }>;
+    };
+    // The OpenAI shape: the leading delta announces the role.
+    expect(parsed.choices[0]?.delta).toEqual({ role: "assistant", content: "" });
+    // Restore: end the hanging response so afterEach can close the app.
+    await response.body!.cancel().catch(() => undefined);
+    app.server.closeAllConnections();
+  });
+
+  it("a slow pre-content failure arrives as an error frame with [DONE], not a hung stream", async () => {
+    const rejected = vi.fn(
+      async () => new Response('{"error":{"message":"Quota reached. Resets in 1h."}}', { status: 429 }),
+    ) as unknown as typeof fetch;
+    app = buildServer("test-key", {
+      store,
+      env: { ...ENV, STREAM_FLUSH_PATIENCE_MS: "0" },
+      fetchImpl: rejected,
+      logger: false,
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: {
+        model: "gemini-3.8-flash",
+        stream: true,
+        messages: [{ role: "user", content: "oi" }],
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    const all = frames(response.body);
+    const errorFrame = all.find((f) => f.error !== undefined);
+    expect(errorFrame?.error?.message).toBeTruthy();
+    expect(response.body.trimEnd().endsWith("data: [DONE]")).toBe(true);
+  });
+
+  it("a normal stream starts with the role frame and never repeats the role", async () => {
+    app = buildServer("test-key", { store, env: ENV, fetchImpl: fetchOk(), logger: false });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: {
+        model: "gemini-3.8-flash",
+        stream: true,
+        messages: [{ role: "user", content: "oi" }],
+      },
+    });
+    const all = frames(response.body);
+    const first = all[0]?.choices?.[0]?.delta as Record<string, unknown> | undefined;
+    expect(first?.role).toBe("assistant");
+    const roleRepeats = all.slice(1).filter((f) => {
+      const delta = f.choices?.[0]?.delta as Record<string, unknown> | undefined;
+      return delta?.role !== undefined;
+    });
+    expect(roleRepeats).toHaveLength(0);
   });
 });
 

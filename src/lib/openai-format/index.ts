@@ -53,7 +53,8 @@ export type DeltaToolCall = {
   thoughtSignature?: string;
 };
 
-export type DeltaContent = { content?: string; tool_calls?: DeltaToolCall[] };
+/** The role rides the first delta of a stream, per the OpenAI shape. */
+export type DeltaContent = { role?: string; content?: string; tool_calls?: DeltaToolCall[] };
 
 export type ChatCompletionChunk = {
   id: string;

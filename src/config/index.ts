@@ -113,6 +113,18 @@ export function getCooldownTransientMs(env: NodeJS.ProcessEnv = process.env): nu
 export function getTransientRetryBackoffMs(env: NodeJS.ProcessEnv = process.env): number {
   return nonNegativeInt(env.TRANSIENT_RETRY_BACKOFF_MS, 1_000);
 }
+
+/**
+ * How long a `stream:true` request waits for the first content byte before the SSE
+ * head is flushed anyway. An unconditional immediate flush would turn every instant
+ * failure (an empty pool, a validation 400 — the answers that made the client's
+ * retry loop stop, see 4e93d50) into a 200-with-error-frame; holding the head a
+ * moment keeps those statuses real, while slow failures (upstream 429 walls,
+ * failover chains) still become frames instead of dead air. 0 flushes immediately.
+ */
+export function getStreamFlushPatienceMs(env: NodeJS.ProcessEnv = process.env): number {
+  return nonNegativeInt(env.STREAM_FLUSH_PATIENCE_MS, 1_500);
+}
 export function getMaxFailoverAttempts(env: NodeJS.ProcessEnv = process.env): number {
   return positiveInt(env.MAX_FAILOVER_ATTEMPTS, 3);
 }

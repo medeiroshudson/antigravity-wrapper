@@ -187,6 +187,14 @@ The stream ends with `data: [DONE]`. If an error happens **after** the first byt
 left, it arrives as a `data: {"error":{…}}` frame followed by the `[DONE]` — that is
 intentional, so a client waiting on the `[DONE]` does not sit hanging.
 
+The SSE head is not flushed immediately: for `STREAM_FLUSH_PATIENCE_MS` (default 1.5 s) the
+route holds the headers back, so an **instant** failure (unknown model, empty pool) still
+answers with its real HTTP status. If the first content byte takes longer than the patience,
+the head goes out first — with the OpenAI-shaped `{"role":"assistant","content":""}` leading
+delta — and a failure that arrives after that point is an error frame inside the 200. The
+access log therefore reads 200 for such turns; the truthful signal is the `chat failed` log
+line with `headersSent: true`.
+
 ---
 
 ## 7. Tool calling
