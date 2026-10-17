@@ -1,4 +1,4 @@
-import type { QuotaBucket } from "../accounts/store.js";
+import type { AccountSnapshot, QuotaBucket } from "../accounts/store.js";
 import { toIsoUtc, toResetPhrase } from "./datetime.js";
 
 export interface BucketView {
@@ -17,6 +17,91 @@ export interface GroupView {
   description: string | null;
   fetchedAt: string | null;
   buckets: BucketView[];
+}
+
+export interface FamilyQuotaSummary {
+  available: boolean;
+  remainingPercent: number;
+  resetsIn: string | null;
+}
+
+export interface LeanPoolQuota {
+  generatedAt: string;
+  activeAccounts: number;
+  gemini: FamilyQuotaSummary;
+  claudeGpt: FamilyQuotaSummary;
+}
+
+/**
+ * Assembles a lean summary of Gemini and Claude/GPT quota across all active accounts in the pool.
+ *
+ * - Active accounts: `enabled === true && status !== "invalid"` (expired cooldowns are treated as active).
+ * - For each family:
+ *   - `available`: true if at least one active account has usable quota (> 0%) for that family.
+ *   - `remainingPercent`: best remaining percentage among active accounts with measured quota (0..100).
+ *   - `resetsIn`: human-readable time remaining until the earliest quota reset among depleted/partially-used buckets.
+ */
+export function toLeanPoolQuota(
+  accounts: readonly AccountSnapshot[],
+  now: number = Date.now(),
+): LeanPoolQuota {
+  const active = accounts.filter((account) => {
+    if (!account.enabled) return false;
+    if (account.status === "invalid") return false;
+    return true;
+  });
+
+  const summarizeFamily = (prefix: string): FamilyQuotaSummary => {
+    let bestFraction = 0;
+    let hasKnownQuota = false;
+    let earliestResetAt: number | null = null;
+
+    for (const account of active) {
+      const familyBuckets = account.quota.filter((b) => b.bucketId.startsWith(prefix));
+      if (familyBuckets.length === 0) continue;
+
+      hasKnownQuota = true;
+
+      // The account's effective quota for this family is the lowest remainingFraction across its buckets
+      const accountLowest = familyBuckets.reduce(
+        (lowest, b) => Math.min(lowest, b.remainingFraction),
+        1,
+      );
+
+      // If the account is in active cooldown, but this family has 0 quota or cooldown applies
+      const inCooldown = account.status === "cooldown" && (account.cooldownUntil ?? 0) > now;
+      const effectiveFraction = inCooldown && accountLowest <= 0 ? 0 : accountLowest;
+
+      if (effectiveFraction > bestFraction) {
+        bestFraction = effectiveFraction;
+      }
+
+      // Check reset times for buckets that are partially or fully consumed (< 100%)
+      for (const bucket of familyBuckets) {
+        if (bucket.remainingFraction < 1 && bucket.resetAt !== null && bucket.resetAt > now) {
+          if (earliestResetAt === null || bucket.resetAt < earliestResetAt) {
+            earliestResetAt = bucket.resetAt;
+          }
+        }
+      }
+    }
+
+    const available = hasKnownQuota && bestFraction > 0;
+    const remainingPercent = Math.max(0, Math.min(100, Math.round(bestFraction * 100)));
+
+    return {
+      available,
+      remainingPercent,
+      resetsIn: toResetPhrase(earliestResetAt, now),
+    };
+  };
+
+  return {
+    generatedAt: toIsoUtc(now) ?? new Date(now).toISOString(),
+    activeAccounts: active.length,
+    gemini: summarizeFamily("gemini-"),
+    claudeGpt: summarizeFamily("3p-"),
+  };
 }
 
 /**

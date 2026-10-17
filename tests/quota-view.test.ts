@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { QuotaBucket } from "../src/lib/accounts/store.js";
-import { toGroupsView } from "../src/lib/format/quota.js";
+import type { AccountSnapshot, QuotaBucket } from "../src/lib/accounts/store.js";
+import { toGroupsView, toLeanPoolQuota } from "../src/lib/format/quota.js";
 
 const NOW = Date.parse("2026-10-14T00:00:00Z");
 
@@ -103,5 +103,149 @@ describe("toGroupsView", () => {
     );
     expect(groups).toHaveLength(1);
     expect(groups[0]?.buckets).toHaveLength(2);
+  });
+});
+
+describe("toLeanPoolQuota", () => {
+  function makeAccount(over: Partial<AccountSnapshot> = {}): AccountSnapshot {
+    return {
+      id: "acc-1",
+      email: "test@example.com",
+      refreshToken: "rt",
+      accessToken: "at",
+      accessExpiresAt: NOW + 3600_000,
+      projectId: "proj-1",
+      status: "active",
+      cooldownUntil: null,
+      lastError: null,
+      quotaSummaryError: null,
+      paidTierId: "g1-pro",
+      paidTierName: "Pro",
+      enabled: true,
+      priority: 0,
+      createdAt: NOW - 86400_000,
+      lastUsedAt: null,
+      quota: [],
+      ...over,
+    };
+  }
+
+  it("returns zeroed summary when there are no accounts", () => {
+    const summary = toLeanPoolQuota([], NOW);
+    expect(summary.activeAccounts).toBe(0);
+    expect(summary.generatedAt).toBe("2026-10-14T00:00:00Z");
+    expect(summary.gemini).toEqual({
+      available: false,
+      remainingPercent: 0,
+      resetsIn: null,
+    });
+    expect(summary.claudeGpt).toEqual({
+      available: false,
+      remainingPercent: 0,
+      resetsIn: null,
+    });
+  });
+
+  it("ignores disabled or invalid accounts", () => {
+    const disabledAcc = makeAccount({
+      id: "disabled",
+      enabled: false,
+      quota: [row({ bucketId: "gemini-5h", remainingFraction: 0.9 })],
+    });
+    const invalidAcc = makeAccount({
+      id: "invalid",
+      status: "invalid",
+      quota: [row({ bucketId: "gemini-5h", remainingFraction: 0.9 })],
+    });
+
+    const summary = toLeanPoolQuota([disabledAcc, invalidAcc], NOW);
+    expect(summary.activeAccounts).toBe(0);
+    expect(summary.gemini.available).toBe(false);
+    expect(summary.gemini.remainingPercent).toBe(0);
+  });
+
+  it("calculates best remainingPercent and nearest resetsIn across active accounts", () => {
+    const acc1 = makeAccount({
+      id: "acc-1",
+      quota: [
+        row({
+          bucketId: "gemini-5h",
+          window: "5h",
+          remainingFraction: 0.8,
+          resetAt: NOW + 7200_000, // in 2h
+        }),
+        row({
+          bucketId: "3p-5h",
+          window: "5h",
+          remainingFraction: 0.4,
+          resetAt: NOW + 3600_000, // in 1h
+        }),
+      ],
+    });
+
+    const acc2 = makeAccount({
+      id: "acc-2",
+      quota: [
+        row({
+          bucketId: "gemini-5h",
+          window: "5h",
+          remainingFraction: 0.95,
+          resetAt: NOW + 14400_000, // in 4h
+        }),
+        row({
+          bucketId: "3p-5h",
+          window: "5h",
+          remainingFraction: 0.1,
+          resetAt: NOW + 1800_000, // in 30m
+        }),
+      ],
+    });
+
+    const summary = toLeanPoolQuota([acc1, acc2], NOW);
+    expect(summary.activeAccounts).toBe(2);
+
+    // Gemini: best fraction is 0.95 -> 95%, nearest reset with remainingFraction < 1 is 2h
+    expect(summary.gemini.available).toBe(true);
+    expect(summary.gemini.remainingPercent).toBe(95);
+    expect(summary.gemini.resetsIn).toBe("2h 0m");
+
+    // Claude/GPT: best fraction is 0.4 -> 40%, nearest reset with remainingFraction < 1 is 30m
+    expect(summary.claudeGpt.available).toBe(true);
+    expect(summary.claudeGpt.remainingPercent).toBe(40);
+    expect(summary.claudeGpt.resetsIn).toBe("30m");
+  });
+
+  it("handles accounts in active cooldown whose quota is 0", () => {
+    const cooldownAcc = makeAccount({
+      id: "acc-cd",
+      status: "cooldown",
+      cooldownUntil: NOW + 3600_000, // active cooldown
+      quota: [
+        row({
+          bucketId: "gemini-5h",
+          remainingFraction: 0,
+          resetAt: NOW + 3600_000,
+        }),
+      ],
+    });
+
+    const summary = toLeanPoolQuota([cooldownAcc], NOW);
+    expect(summary.activeAccounts).toBe(1);
+    expect(summary.gemini.available).toBe(false);
+    expect(summary.gemini.remainingPercent).toBe(0);
+    expect(summary.gemini.resetsIn).toBe("1h 0m");
+  });
+
+  it("considers accounts with unknown quota as not available if no account has quota", () => {
+    const unknownAcc = makeAccount({
+      id: "acc-free",
+      quota: [], // free tier or summary read failure
+    });
+
+    const summary = toLeanPoolQuota([unknownAcc], NOW);
+    expect(summary.activeAccounts).toBe(1);
+    expect(summary.gemini.available).toBe(false);
+    expect(summary.gemini.remainingPercent).toBe(0);
+    expect(summary.gemini.resetsIn).toBeNull();
   });
 });
