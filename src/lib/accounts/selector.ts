@@ -31,6 +31,18 @@ export function summarizeQuota(account: AccountSnapshot, runtimeModel: string): 
   return relevant.reduce((lowest, row) => Math.min(lowest, row.remainingFraction), 1);
 }
 
+function hasExpiredZeroQuota(account: AccountSnapshot, runtimeModel: string, now: number): boolean {
+  const prefix = groupPrefix(runtimeModel);
+  if (!prefix) return false;
+  const bucketPrefix = `${prefix}-`;
+  const relevant = account.quota.filter((row) => row.bucketId.startsWith(bucketPrefix));
+  if (relevant.length === 0) return false;
+  const zeroBuckets = relevant.filter((row) => row.remainingFraction === 0);
+  if (zeroBuckets.length === 0) return false;
+  // If zero quota, only eligible if all binding zero buckets have resetAt <= now
+  return zeroBuckets.every((b) => b.resetAt !== null && b.resetAt <= now);
+}
+
 /**
  * Orders the candidates for a request. Pure function: no network, no SQLite.
  *
@@ -40,11 +52,10 @@ export function summarizeQuota(account: AccountSnapshot, runtimeModel: string): 
  *       since discarding it would silently and permanently lose the account. An active
  *       cooldown only benches the account for the model family that drained: a family with
  *       quota left keeps it eligible (the wall is per family, the cooldown is per account)
- *  2. explicit priority comes before quota
- *  3. known quota before unknown quota — unknown is NEUTRAL,
- *     neither zero (would exclude a new account) nor full (would always be preferred);
- *     an account with no group summary lands here, still eligible
- *  4. within the group, decreasing quota and, on a tie, older use
+ *  2. accounts with a measured quota of 0 are discarded unless their resetAt <= now
+ *  3. explicit priority comes before quota
+ *  4. known positive quota before unknown quota, unknown quota before expired zero quota
+ *  5. within the group, decreasing quota and, on a tie, older use
  */
 export function order(
   snapshot: readonly AccountSnapshot[],
@@ -54,16 +65,17 @@ export function order(
   const eligible = snapshot.filter((account) => {
     if (!account.enabled) return false;
     if (account.status === "invalid") return false;
+    const quota = summarizeQuota(account, runtimeModel);
     if (account.status === "cooldown") {
       // With no expiry recorded, the cooldown is considered over: keeping the
       // account ineligible forever would be a silent, permanent loss.
-      if (account.cooldownUntil === null || account.cooldownUntil <= now) return true;
-      // A quota wall is per model family, but the cooldown is stored on the account. Keep
-      // the account for a family that still has quota, so a drained Claude quota does not
-      // also bench a fully-stocked Gemini quota. Unmeasured quota for the family (null)
-      // stays benched: it is not evidence of room.
-      const quota = summarizeQuota(account, runtimeModel);
-      return quota !== null && quota > 0;
+      if (account.cooldownUntil !== null && account.cooldownUntil > now) {
+        // Still cooling down: keep the account only for a family with positive quota
+        return quota !== null && quota > 0;
+      }
+    }
+    if (quota === 0) {
+      return hasExpiredZeroQuota(account, runtimeModel, now);
     }
     return true;
   });
@@ -74,11 +86,21 @@ export function order(
     if (left.account.priority !== right.account.priority) {
       return right.account.priority - left.account.priority;
     }
-    const leftKnown = left.quota !== null;
-    const rightKnown = right.quota !== null;
-    if (leftKnown !== rightKnown) return leftKnown ? -1 : 1;
-    if (leftKnown && rightKnown && left.quota !== right.quota) {
-      return (right.quota ?? 0) - (left.quota ?? 0);
+    // Tier 1: positive quota (quota > 0)
+    // Tier 2: unknown quota (quota === null)
+    // Tier 3: zero quota whose resetAt passed (quota === 0)
+    const tier = (q: number | null): number => {
+      if (q !== null && q > 0) return 3;
+      if (q === null) return 2;
+      return 1;
+    };
+    const leftTier = tier(left.quota);
+    const rightTier = tier(right.quota);
+    if (leftTier !== rightTier) {
+      return rightTier - leftTier;
+    }
+    if (left.quota !== null && right.quota !== null && left.quota !== right.quota) {
+      return right.quota - left.quota;
     }
     return (left.account.lastUsedAt ?? 0) - (right.account.lastUsedAt ?? 0);
   });

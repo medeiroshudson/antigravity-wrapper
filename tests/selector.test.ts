@@ -182,7 +182,43 @@ describe("order", () => {
     expect(result.map((a) => a.id)).toEqual(["cheio", "meio", "baixo"]);
   });
 
-  it("places unknown quota after the known ones, without discarding", () => {
+  it("discards accounts with measured zero quota whose resetAt is in the future", () => {
+    const result = order(
+      [
+        account({ id: "zerada", quota: [{ ...bucket("gemini-5h", 0), resetAt: NOW + 1000 }] }),
+        account({ id: "com-cota", quota: [bucket("gemini-5h", 0.5)] }),
+      ],
+      "gemini-3.8-flash-high",
+      NOW,
+    );
+    expect(result.map((a) => a.id)).toEqual(["com-cota"]);
+  });
+
+  it("keeps zero quota account if resetAt has already passed", () => {
+    const result = order(
+      [
+        account({ id: "resetou", quota: [{ ...bucket("gemini-5h", 0), resetAt: NOW - 100 }] }),
+        account({ id: "ativa", quota: [bucket("gemini-5h", 0.5)] }),
+      ],
+      "gemini-3.8-flash-high",
+      NOW,
+    );
+    expect(result.map((a) => a.id)).toEqual(["ativa", "resetou"]);
+  });
+
+  it("places accounts with verified positive quota before unknown/free-tier quota", () => {
+    const result = order(
+      [
+        account({ id: "free-sem-quota", quota: [] }),
+        account({ id: "pro-com-quota", quota: [bucket("gemini-5h", 0.2)] }),
+      ],
+      "gemini-3.8-flash-high",
+      NOW,
+    );
+    expect(result.map((a) => a.id)).toEqual(["pro-com-quota", "free-sem-quota"]);
+  });
+
+  it("places unknown quota after the known positive ones, without discarding", () => {
     const result = order(
       [account({ id: "desconhecida" }), account({ id: "conhecida", quota: [bucket("gemini-5h", 0.3)] })],
       "gemini-3.8-flash-high",
@@ -191,13 +227,13 @@ describe("order", () => {
     expect(result.map((a) => a.id)).toEqual(["conhecida", "desconhecida"]);
   });
 
-  it("keeps unknown quota after a known quota equal to zero", () => {
+  it("discards zero quota account with no reset time or future reset time", () => {
     const result = order(
       [account({ id: "desconhecida" }), account({ id: "zerada", quota: [bucket("gemini-5h", 0)] })],
       "gemini-3.8-flash-high",
       NOW,
     );
-    expect(result.map((a) => a.id)).toEqual(["zerada", "desconhecida"]);
+    expect(result.map((a) => a.id)).toEqual(["desconhecida"]);
   });
 
   it("breaks ties by the oldest lastUsedAt", () => {
