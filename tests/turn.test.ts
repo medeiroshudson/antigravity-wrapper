@@ -500,4 +500,18 @@ describe("TurnRunner logging", () => {
     expect(candidates?.obj.candidates).toEqual(["a1"]);
     expect(lines.some((l) => l.msg === "account attempt" && l.level === "debug")).toBe(true);
   });
+
+  it("applies cooldown failure and triggers refresh on transient rate limit", async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response('{"error":{"message":"Resource has been exhausted (e.g. check quota)."}}', { status: 429 }),
+    ) as unknown as typeof fetch;
+    const accounts = service([snapshot("a1")]);
+    const runner = new TurnRunner({ accounts, fetchImpl });
+    await runner.run(BASE).catch(() => undefined);
+    expect(accounts.applyFailure).toHaveBeenCalledWith(
+      "a1",
+      expect.objectContaining({ kind: "transient_rate_limit", status: 429 }),
+    );
+    expect(accounts.refreshQuota).toHaveBeenCalledWith("a1");
+  });
 });
