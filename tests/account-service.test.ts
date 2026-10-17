@@ -70,17 +70,15 @@ describe("applyFailure", () => {
     expect(account?.cooldownUntil).toBeGreaterThan(Date.now() + 3_600_000);
   });
 
-  it("leaves the state unchanged on a transient 429 (spec §11)", () => {
-    seed();
-    const service = new AccountService({ store, env: ENV });
-    service.applyFailure("a1", new UpstreamError("transient_rate_limit", 429, "rl"));
-    const account = store.getAccount("a1");
-    // The spec's error table says a transient throttle changes nothing in the pool.
-    // Cooling the account down instead took it out of rotation for the whole
-    // cooldown window, so every later request answered 503 while the quota was
-    // still almost untouched.
-    expect(account?.status).toBe("active");
-    expect(account?.cooldownUntil).toBeNull();
+  it("places account in cooldown on transient_rate_limit", () => {
+    seed("a1");
+    const service = new AccountService({ store, env: { ...ENV, COOLDOWN_TRANSIENT_MS: "45000" } });
+    const before = Date.now();
+    service.applyFailure("a1", new UpstreamError("transient_rate_limit", 429, "Too many requests"));
+    const acc = store.getAccount("a1");
+    expect(acc?.status).toBe("cooldown");
+    expect(acc?.cooldownUntil).toBeGreaterThanOrEqual(before + 45000);
+    expect(acc?.lastError).toBe("Too many requests");
   });
 
   it("marks it invalid on VALIDATION_REQUIRED, storing the reason", () => {

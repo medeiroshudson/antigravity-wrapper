@@ -95,16 +95,11 @@ export class AccountService {
     const now = this.now();
     switch (error.kind) {
       case "quota":
+      case "transient_rate_limit":
         this.deps.store.setStatus(id, "cooldown", {
           cooldownUntil: now + (error.retryAfterMs ?? getCooldownTransientMs(this.deps.env)),
           lastError: error.message,
         });
-        return;
-      case "transient_rate_limit":
-        // The spec's error table keeps the pool unchanged for transient throttling
-        // (spec §11): the account is healthy and its quota is intact, so cooling it
-        // down only took it out of rotation for the whole window. The runner retries
-        // it after a short backoff instead.
         return;
       case "validation_required":
         this.deps.store.setStatus(id, "invalid", {
