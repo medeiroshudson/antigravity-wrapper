@@ -30,6 +30,18 @@ describe("POST /admin/accounts/start", () => {
     expect(body.authUrl).toContain("accounts.google.com");
     expect(store.takePendingOAuth(body.state)?.verifier).toBeDefined();
   });
+
+  it("accepts requests forwarded by reverse proxies with chunked transfer-encoding and no content-type", async () => {
+    app = buildServer("test-key", { store, env: ENV, logger: false });
+    const response = await app.inject({
+      method: "POST",
+      url: "/admin/accounts/start",
+      headers: { ...auth, "transfer-encoding": "chunked" },
+    });
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as { authUrl: string; state: string };
+    expect(body.authUrl).toContain("accounts.google.com");
+  });
 });
 
 describe("POST /admin/accounts/complete", () => {

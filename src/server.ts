@@ -46,6 +46,28 @@ export function buildServer(
     bodyLimit: getBodyLimitBytes({ ...process.env, ...(deps.env ?? {}) }),
   });
 
+  // Reverse proxies (e.g. Cloudflare Tunnel, Traefik over HTTP/2) forward bodyless
+  // POST requests with `Transfer-Encoding: chunked`. Fastify's default behavior treats
+  // any non-empty body indicator without a Content-Type header as 415 Unsupported Media Type.
+  // A catch-all parser consumes empty/untyped payloads without rejecting bodyless calls.
+  app.addContentTypeParser("*", (_request, payload, done) => {
+    let data = "";
+    payload.on("data", (chunk: Buffer) => {
+      data += chunk;
+    });
+    payload.on("end", () => {
+      if (!data || data.trim().length === 0) {
+        done(null, undefined);
+        return;
+      }
+      try {
+        done(null, JSON.parse(data));
+      } catch {
+        done(null, data);
+      }
+    });
+  });
+
   // Bearer required on EVERY route, including /health and /admin.
   app.addHook("onRequest", async (request, reply) => {
     const header = request.headers.authorization;
