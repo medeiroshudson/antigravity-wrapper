@@ -242,6 +242,17 @@ describe("AccountStore", () => {
     expect(store.takePendingOAuth("state-2")).toBeUndefined();
   });
 
+  it("clears lastError and updates lastUsedAt when touched", () => {
+    add();
+    store.setStatus("a1", "cooldown", { lastError: "Resource exhausted" });
+    expect(store.getAccount("a1")?.lastError).toBe("Resource exhausted");
+
+    store.touch("a1");
+    const account = store.getAccount("a1");
+    expect(account?.lastError).toBeNull();
+    expect(account?.lastUsedAt).not.toBeNull();
+  });
+
   it("returns a snapshot with the account's buckets", () => {
     add();
     store.replaceQuota("a1", [bucket()]);

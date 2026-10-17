@@ -289,7 +289,7 @@ export class AccountStore {
   }
 
   touch(id: string): void {
-    this.db.prepare("UPDATE accounts SET last_used_at = ? WHERE id = ?").run(Date.now(), id);
+    this.db.prepare("UPDATE accounts SET last_used_at = ?, last_error = NULL WHERE id = ?").run(Date.now(), id);
   }
 
   removeAccount(id: string): void {
