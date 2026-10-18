@@ -85,3 +85,167 @@ describe("isGenerationConfigMapEnabled", () => {
     expect(isGenerationConfigMapEnabled({ GENERATION_CONFIG_MAP: "true" })).toBe(true);
   });
 });
+
+describe("max_tokens and max_completion_tokens aliasing", () => {
+  it("rejects conflicting max_tokens and max_completion_tokens with HTTP 400", async () => {
+    const { AccountStore } = await import("../src/lib/accounts/store.js");
+    const { applyCatalog, resetRegistryForTests } = await import("../src/config/models.js");
+    const { CATALOG } = await import("./fixtures/catalog.js");
+    const { buildServer } = await import("../src/server.js");
+
+    const store = new AccountStore(":memory:");
+    applyCatalog(CATALOG);
+    store.upsertAccount({
+      id: "a1",
+      email: "a1@x.com",
+      refreshToken: "r",
+      accessToken: "tok",
+      accessExpiresAt: Date.now() + 3_600_000,
+      projectId: "aicode-consumers",
+    });
+    const app = buildServer("secret", {
+      store,
+      env: { ANTIGRAVITY_CLIENT_ID: "c", ANTIGRAVITY_CLIENT_SECRET: "s" },
+      logger: false,
+    });
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: "Bearer secret" },
+        payload: {
+          model: "gemini-2.5-flash",
+          messages: [{ role: "user", content: "hi" }],
+          max_tokens: 100,
+          max_completion_tokens: 200,
+        },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.message).toMatch(/conflicting/i);
+    } finally {
+      await app.close();
+      store.close();
+      resetRegistryForTests();
+    }
+  });
+
+  it("accepts max_completion_tokens alone and forwards it as maxOutputTokens", async () => {
+    const { AccountStore } = await import("../src/lib/accounts/store.js");
+    const { applyCatalog, resetRegistryForTests } = await import("../src/config/models.js");
+    const { CATALOG } = await import("./fixtures/catalog.js");
+    const { buildServer } = await import("../src/server.js");
+
+    const store = new AccountStore(":memory:");
+    applyCatalog(CATALOG);
+    store.upsertAccount({
+      id: "a1",
+      email: "a1@x.com",
+      refreshToken: "r",
+      accessToken: "tok",
+      accessExpiresAt: Date.now() + 3_600_000,
+      projectId: "aicode-consumers",
+    });
+
+    let capturedBody: any = null;
+    const fetchImpl = (async (_url: string, init?: RequestInit) => {
+      capturedBody = JSON.parse(String(init?.body));
+      const sse = [
+        'data: {"response":{"candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"STOP"}]}}\n\n',
+        "data: [DONE]\n\n",
+      ].join("");
+      const stream = new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(new TextEncoder().encode(sse));
+          c.close();
+        },
+      });
+      return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+    }) as unknown as typeof fetch;
+
+    const app = buildServer("secret", {
+      store,
+      fetchImpl,
+      env: { ANTIGRAVITY_CLIENT_ID: "c", ANTIGRAVITY_CLIENT_SECRET: "s" },
+      logger: false,
+    });
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: "Bearer secret" },
+        payload: {
+          model: "gemini-2.5-flash",
+          messages: [{ role: "user", content: "hi" }],
+          max_completion_tokens: 350,
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(capturedBody?.request?.generationConfig?.maxOutputTokens).toBe(350);
+    } finally {
+      await app.close();
+      store.close();
+      resetRegistryForTests();
+    }
+  });
+
+  it("accepts matching max_tokens and max_completion_tokens", async () => {
+    const { AccountStore } = await import("../src/lib/accounts/store.js");
+    const { applyCatalog, resetRegistryForTests } = await import("../src/config/models.js");
+    const { CATALOG } = await import("./fixtures/catalog.js");
+    const { buildServer } = await import("../src/server.js");
+
+    const store = new AccountStore(":memory:");
+    applyCatalog(CATALOG);
+    store.upsertAccount({
+      id: "a1",
+      email: "a1@x.com",
+      refreshToken: "r",
+      accessToken: "tok",
+      accessExpiresAt: Date.now() + 3_600_000,
+      projectId: "aicode-consumers",
+    });
+
+    let capturedBody: any = null;
+    const fetchImpl = (async (_url: string, init?: RequestInit) => {
+      capturedBody = JSON.parse(String(init?.body));
+      const sse = [
+        'data: {"response":{"candidates":[{"content":{"parts":[{"text":"hi"}]},"finishReason":"STOP"}]}}\n\n',
+        "data: [DONE]\n\n",
+      ].join("");
+      const stream = new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(new TextEncoder().encode(sse));
+          c.close();
+        },
+      });
+      return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+    }) as unknown as typeof fetch;
+
+    const app = buildServer("secret", {
+      store,
+      fetchImpl,
+      env: { ANTIGRAVITY_CLIENT_ID: "c", ANTIGRAVITY_CLIENT_SECRET: "s" },
+      logger: false,
+    });
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: "Bearer secret" },
+        payload: {
+          model: "gemini-2.5-flash",
+          messages: [{ role: "user", content: "hi" }],
+          max_tokens: 250,
+          max_completion_tokens: 250,
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(capturedBody?.request?.generationConfig?.maxOutputTokens).toBe(250);
+    } finally {
+      await app.close();
+      store.close();
+      resetRegistryForTests();
+    }
+  });
+});
+

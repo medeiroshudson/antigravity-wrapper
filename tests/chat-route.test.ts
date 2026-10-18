@@ -1045,4 +1045,198 @@ describe("request logging", () => {
     expect(line?.finishReason).toBe("stop");
     expect(typeof line?.reqId).toBe("string");
   });
+
+  it("streams usage chunk before [DONE] when stream_options.include_usage is true", async () => {
+    app = buildServer("test-key", { store, env: ENV, fetchImpl: fetchOk(), logger: false });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: {
+        model: "gemini-3.8-flash",
+        messages: [{ role: "user", content: "oi" }],
+        stream: true,
+        stream_options: { include_usage: true },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const rawBlocks = response.body
+      .split("\n\n")
+      .map((block) => block.trim())
+      .filter((block) => block.length > 0);
+
+    expect(rawBlocks[rawBlocks.length - 1]).toBe("data: [DONE]");
+    const usageFrameRaw = rawBlocks[rawBlocks.length - 2];
+    expect(usageFrameRaw.startsWith("data: {")).toBe(true);
+    const usageChunk = JSON.parse(usageFrameRaw.slice("data: ".length));
+    expect(usageChunk.choices).toEqual([]);
+    expect(usageChunk.usage).toBeDefined();
+    expect(usageChunk.usage.total_tokens).toBe(6);
+  });
+
+  it("forwards sampling options and stop sequences to envelope, adding standing warning for stop", async () => {
+    const capture = fetchCapture();
+    app = buildServer("test-key", { store, env: ENV, fetchImpl: capture.fetchImpl, logger: false });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: {
+        model: "gemini-3.8-flash",
+        messages: [{ role: "user", content: "oi" }],
+        temperature: 0.7,
+        top_p: 0.9,
+        top_k: 40,
+        stop: ["END_NOW"],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const envelope = capture.envelope();
+    const genConfig = (envelope?.request as any)?.generationConfig;
+    expect(genConfig).toMatchObject({
+      temperature: 0.7,
+      topP: 0.9,
+      topK: 40,
+      stopSequences: ["END_NOW"],
+    });
+
+    const json = response.json();
+    expect(json.warnings).toBeDefined();
+    expect(json.warnings).toContainEqual(
+      expect.objectContaining({ field: "stop" }),
+    );
+  });
+
+  it("omits empty stop array from envelope and does not add a warning", async () => {
+    const capture = fetchCapture();
+    app = buildServer("test-key", { store, env: ENV, fetchImpl: capture.fetchImpl, logger: false });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: {
+        model: "gemini-3.8-flash",
+        messages: [{ role: "user", content: "oi" }],
+        stop: [],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const envelope = capture.envelope();
+    const genConfig = (envelope?.request as any)?.generationConfig;
+    expect(genConfig?.stopSequences).toBeUndefined();
+    expect(response.json().warnings).toBeUndefined();
+  });
+
+  it("forwards response_format json_schema to envelope generationConfig", async () => {
+    const capture = fetchCapture();
+    app = buildServer("test-key", { store, env: ENV, fetchImpl: capture.fetchImpl, logger: false });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: {
+        model: "gemini-3.8-flash",
+        messages: [{ role: "user", content: "oi" }],
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            schema: {
+              type: "object",
+              properties: { name: { type: "string" } },
+              $schema: "http://json-schema.org/draft-07/schema#",
+            },
+          },
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const envelope = capture.envelope();
+    const genConfig = (envelope?.request as any)?.generationConfig;
+    expect(genConfig?.responseMimeType).toBe("application/json");
+    expect(genConfig?.responseSchema).toEqual({
+      type: "object",
+      properties: { name: { type: "string" } },
+    });
+    expect(response.json().warnings).toContainEqual(
+      expect.objectContaining({ field: "response_format.json_schema" }),
+    );
+  });
+
+  it("collects warnings for declared-ignored, unrecognized body fields, and extra stream_options", async () => {
+    app = buildServer("test-key", { store, env: ENV, fetchImpl: fetchOk(), logger: false });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: {
+        model: "gemini-3.8-flash",
+        messages: [{ role: "user", content: "oi" }],
+        seed: 42,
+        presence_penalty: 1.5,
+        future_unrecognized_opt: "xyz",
+        stream_options: { other_flag: true },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const json = response.json();
+    expect(json.warnings).toContainEqual(
+      expect.objectContaining({ field: "seed" }),
+    );
+    expect(json.warnings).toContainEqual(
+      expect.objectContaining({ field: "presence_penalty" }),
+    );
+    expect(json.warnings).toContainEqual(
+      expect.objectContaining({ field: "future_unrecognized_opt" }),
+    );
+    expect(json.warnings).toContainEqual(
+      expect.objectContaining({ field: "stream_options.other_flag" }),
+    );
+  });
+
+  it("attaches warnings to stream finish-reason chunk and trailing usage chunk", async () => {
+    app = buildServer("test-key", { store, env: ENV, fetchImpl: fetchOk(), logger: false });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: {
+        model: "gemini-3.8-flash",
+        messages: [{ role: "user", content: "oi" }],
+        stream: true,
+        stream_options: { include_usage: true },
+        seed: 1234,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const rawBlocks = response.body
+      .split("\n\n")
+      .map((block) => block.trim())
+      .filter((block) => block.length > 0);
+
+    expect(rawBlocks[rawBlocks.length - 1]).toBe("data: [DONE]");
+
+    // Trailing usage chunk
+    const usageChunkRaw = rawBlocks[rawBlocks.length - 2];
+    const usageChunk = JSON.parse(usageChunkRaw.slice("data: ".length));
+    expect(usageChunk.choices).toEqual([]);
+    expect(usageChunk.usage).toBeDefined();
+    expect(usageChunk.warnings).toContainEqual(
+      expect.objectContaining({ field: "seed" }),
+    );
+
+    // Finish reason chunk immediately preceding usage chunk
+    const finishChunkRaw = rawBlocks[rawBlocks.length - 3];
+    const finishChunk = JSON.parse(finishChunkRaw.slice("data: ".length));
+    expect(finishChunk.choices[0]?.finish_reason).toBe("stop");
+    expect(finishChunk.warnings).toContainEqual(
+      expect.objectContaining({ field: "seed" }),
+    );
+  });
 });
+

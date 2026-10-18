@@ -7,7 +7,7 @@ import {
   resolveRuntimeModel,
   type ReasoningEffort,
 } from "../config/models.js";
-import { getStreamFlushPatienceMs } from "../config/index.js";
+import { getStreamFlushPatienceMs, isGenerationConfigMapEnabled } from "../config/index.js";
 import { t } from "../i18n/index.js";
 import type { AccountStore } from "../lib/accounts/store.js";
 import { AccountService } from "../lib/accounts/service.js";
@@ -20,6 +20,12 @@ import {
   extractToolDefs,
   toolInstruction,
 } from "../lib/chat/tools.js";
+import {
+  DECLARED_IGNORED_FIELDS,
+  WarningCollector,
+  type Warning,
+} from "../lib/chat/diagnostics.js";
+import { buildResponseFormatConfig } from "../lib/chat/schema-sanitizer.js";
 import { getAccountService } from "../lib/runtime.js";
 import {
   buildChunk,
@@ -29,14 +35,27 @@ import {
   toOpenAIErrorBody,
 } from "../lib/openai-format/index.js";
 
+interface StreamOptions {
+  include_usage?: boolean;
+  [key: string]: unknown;
+}
+
 interface ChatBody {
   model: string;
   messages: ChatMessage[];
   stream?: boolean;
   reasoning_effort?: unknown;
   max_tokens?: number;
+  max_completion_tokens?: number;
+  temperature?: number;
+  top_p?: number;
+  top_k?: number;
+  stop?: string | string[];
+  response_format?: unknown;
+  stream_options?: StreamOptions;
   tools?: unknown[];
   tool_choice?: unknown;
+  [key: string]: unknown;
 }
 
 const bodySchema = {
@@ -49,11 +68,35 @@ const bodySchema = {
       stream: { type: "boolean" },
       reasoning_effort: {},
       max_tokens: { type: "integer" },
+      max_completion_tokens: { type: "integer" },
+      temperature: { type: "number" },
+      top_p: { type: "number" },
+      top_k: { type: "integer" },
+      stop: {},
+      response_format: {},
+      stream_options: {},
       tools: { type: "array" },
       tool_choice: {},
     },
   },
 } as const;
+
+const KNOWN_BODY_FIELDS = new Set([
+  "model",
+  "messages",
+  "stream",
+  "reasoning_effort",
+  "max_tokens",
+  "max_completion_tokens",
+  "temperature",
+  "top_p",
+  "top_k",
+  "stop",
+  "response_format",
+  "stream_options",
+  "tools",
+  "tool_choice",
+]);
 
 /**
  * The upstream classifies a definitive failure by *why* it refused; the caller must see
@@ -147,6 +190,46 @@ export async function chatRoutes(
       "chat request",
     );
 
+    const warningCollector = new WarningCollector();
+    for (const key of Object.keys(body)) {
+      if (DECLARED_IGNORED_FIELDS.includes(key)) {
+        warningCollector.add(key, t("warn.ignoredField", { field: key }));
+      } else if (!KNOWN_BODY_FIELDS.has(key)) {
+        warningCollector.add(key, t("warn.unrecognizedField", { field: key }));
+      }
+    }
+
+    if (body.stream_options && typeof body.stream_options === "object" && !Array.isArray(body.stream_options)) {
+      for (const optKey of Object.keys(body.stream_options)) {
+        if (optKey !== "include_usage") {
+          warningCollector.add(
+            `stream_options.${optKey}`,
+            t("warn.unrecognizedField", { field: `stream_options.${optKey}` }),
+          );
+        }
+      }
+    }
+
+    if (
+      body.max_tokens !== undefined &&
+      body.max_completion_tokens !== undefined &&
+      body.max_tokens !== body.max_completion_tokens
+    ) {
+      log.warn(
+        { model: body.model, max_tokens: body.max_tokens, max_completion_tokens: body.max_completion_tokens },
+        "conflicting max_tokens and max_completion_tokens",
+      );
+      const mapped = toOpenAIErrorBody(
+        new Error(
+          `Conflicting max_tokens (${body.max_tokens}) and max_completion_tokens (${body.max_completion_tokens}): both fields were provided with different values`,
+        ),
+        400,
+      );
+      reply.status(400).send(mapped.body);
+      return;
+    }
+    const effectiveMaxTokens = body.max_completion_tokens ?? body.max_tokens;
+
     if (!getPublicModels().some((model) => model.id === body.model)) {
       log.warn({ model: body.model }, "model not in catalog");
       const mapped = toOpenAIErrorBody(new Error(t("chat.modelNotFound", { model: body.model })), 404);
@@ -173,9 +256,12 @@ export async function chatRoutes(
     try {
       // Native Gemini rejects an unsigned functionCall history; the 3p bridge does not
       // care. Strictness only pays where the rule exists.
-      ({ contents, systemInstruction } = toContents(body.messages, {
+      const parsedContents = toContents(body.messages, {
         strictThoughtSignatures: runtimeModel.startsWith("gemini-"),
-      }));
+      });
+      contents = parsedContents.contents;
+      systemInstruction = parsedContents.systemInstruction;
+      warningCollector.addAll(parsedContents.diagnostics);
     } catch (error) {
       log.warn(
         { model: body.model, err: error instanceof Error ? error.message : String(error) },
@@ -187,13 +273,32 @@ export async function chatRoutes(
     }
 
     const tools = extractToolDefs(body);
-    const { declarations } = buildFunctionDeclarations(tools, runtimeModel);
+    const { declarations, diagnostics: toolDiagnostics } = buildFunctionDeclarations(tools, runtimeModel);
+    warningCollector.addAll(toolDiagnostics);
     // `toolInstruction` already implements the spec table: `auto`/absent -> null;
     // `none`/`required`/named -> instruction without a fence. There is nothing
     // left to suppress — the old guard nullified all three cases and disabled
     // the emulation.
     const instruction = toolInstruction(tools, body.tool_choice);
     const system = instruction ? `${systemInstruction}\n\n${instruction}` : systemInstruction;
+
+    let stopSequences: string[] | undefined;
+    if (typeof body.stop === "string") {
+      stopSequences = [body.stop];
+    } else if (Array.isArray(body.stop)) {
+      stopSequences = body.stop.filter((s): s is string => typeof s === "string");
+    }
+    if (stopSequences && stopSequences.length > 0) {
+      warningCollector.add("stop", t("warn.unverifiedStop"));
+    } else {
+      stopSequences = undefined;
+    }
+
+    const responseFormatConfig = buildResponseFormatConfig(
+      body.response_format,
+      isGenerationConfigMapEnabled(deps.env),
+    );
+    warningCollector.addAll(responseFormatConfig.warnings);
 
     // The injected store (buildServer) must win: the runtime.ts singletons
     // exist for the production entrypoint, not for the route under test.
@@ -207,7 +312,13 @@ export async function chatRoutes(
       systemInstruction: system,
       effort,
       tools: declarations,
-      maxTokens: body.max_tokens,
+      maxTokens: effectiveMaxTokens,
+      temperature: body.temperature,
+      topP: body.top_p,
+      topK: body.top_k,
+      stopSequences,
+      responseMimeType: responseFormatConfig.responseMimeType,
+      responseSchema: responseFormatConfig.responseSchema,
     };
 
     // The signal comes from the `reply`, never from `request.signal`: the latter
@@ -235,7 +346,7 @@ export async function chatRoutes(
           },
           "chat completed",
         );
-        reply.status(200).send(buildCompletion(result, body.model));
+        reply.status(200).send(buildCompletion(result, body.model, warningCollector.toArray()));
       } catch (error) {
         // The client's own verdict: log it as an abort and answer 499 best-effort — the
         // socket may already be gone, and relaying any upstream-style failure (the old
@@ -313,12 +424,16 @@ export async function chatRoutes(
       }, patienceMs);
     }
 
-    const writeChunk = (delta: Record<string, unknown>, finish: string | null): void => {
+    const writeChunk = (
+      delta: Record<string, unknown>,
+      finish: string | null,
+      chunkOpts?: { warnings?: Warning[] },
+    ): void => {
       cancelPatience();
       flushHead();
       const payload = roleSent ? delta : { role: "assistant", ...delta };
       roleSent = true;
-      reply.raw.write(sseEvent(buildChunk(id, body.model, created, payload, finish)));
+      reply.raw.write(sseEvent(buildChunk(id, body.model, created, payload, finish, chunkOpts)));
     };
 
     try {
@@ -348,7 +463,30 @@ export async function chatRoutes(
           null,
         );
       }
-      writeChunk({}, result.finishReason);
+      const allWarnings: Warning[] = [];
+      if (result.warnings && result.warnings.length > 0) {
+        allWarnings.push(...result.warnings);
+      }
+      for (const w of warningCollector.toArray()) {
+        if (!allWarnings.some((existing) => existing.field === w.field && existing.reason === w.reason)) {
+          allWarnings.push(w);
+        }
+      }
+
+      writeChunk({}, result.finishReason, allWarnings.length > 0 ? { warnings: allWarnings } : undefined);
+
+      if (body.stream_options?.include_usage === true) {
+        const usageChunk = buildChunk({
+          id,
+          model: body.model,
+          created,
+          choices: [],
+          usage: result.usage ?? undefined,
+          warnings: allWarnings.length > 0 ? allWarnings : undefined,
+        });
+        reply.raw.write(sseEvent(usageChunk));
+      }
+
       reply.raw.write(SSE_DONE);
       log.info(
         {

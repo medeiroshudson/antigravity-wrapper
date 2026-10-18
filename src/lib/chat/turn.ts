@@ -38,6 +38,12 @@ export interface TurnInput {
   effort: ReasoningEffort;
   tools?: { functionDeclarations: unknown[] };
   maxTokens?: number;
+  temperature?: number;
+  topP?: number;
+  topK?: number;
+  stopSequences?: string[];
+  responseMimeType?: string;
+  responseSchema?: unknown;
 }
 
 export interface TurnOutcome {
@@ -256,6 +262,12 @@ export class TurnRunner {
       sessionId: identity.sessionId,
       labels: identity.labels,
       requestId: identity.requestId,
+      temperature: input.temperature,
+      topP: input.topP,
+      topK: input.topK,
+      stopSequences: input.stopSequences,
+      responseMimeType: input.responseMimeType,
+      responseSchema: input.responseSchema,
     });
 
     const response = await streamGenerate(accessToken, envelope, {
