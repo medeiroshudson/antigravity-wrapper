@@ -4,11 +4,14 @@ import Fastify from "fastify";
 import type { FastifyInstance, FastifyServerOptions } from "fastify";
 import { getBodyLimitBytes, getHost, getLogLevel, getPort, resolveApiKey } from "./config/index.js";
 import { resolveLocale, setLocale, t } from "./i18n/index.js";
+import type { AccountService } from "./lib/accounts/service.js";
 import type { AccountStore } from "./lib/accounts/store.js";
+import type { ImageService } from "./lib/images/service.js";
 import { toOpenAIErrorBody } from "./lib/openai-format/index.js";
 import { startCatalogRefresh } from "./lib/runtime.js";
 import { accountsRoutes } from "./routes/accounts.js";
 import { chatRoutes } from "./routes/chat.js";
+import { imagesRoutes } from "./routes/images.js";
 import { modelsRoutes } from "./routes/models.js";
 
 export interface BuildServerDeps {
@@ -17,6 +20,8 @@ export interface BuildServerDeps {
   fetchImpl?: typeof fetch;
   /** Injectable so tests can silence the request log. Default: true. */
   logger?: FastifyServerOptions["logger"];
+  accountService?: AccountService;
+  imageService?: ImageService;
 }
 
 function readStatus(error: unknown): number | null {
@@ -94,6 +99,7 @@ export function buildServer(
   app.register(modelsRoutes);
   app.register(chatRoutes, deps);
   app.register(accountsRoutes, deps);
+  app.register(imagesRoutes, deps);
 
   app.get("/health", async () => ({ status: "ok" }));
 
