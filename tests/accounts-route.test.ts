@@ -394,4 +394,116 @@ describe("management", () => {
   it("returns 404 when removing a non-existent account", async () => {
     expect((await app.inject({ method: "DELETE", url: "/admin/accounts/nada", headers: auth })).statusCode).toBe(404);
   });
+
+  it("returns lean pool quota summary on /accounts/quota", async () => {
+    store.replaceQuota("a1", [
+      {
+        bucketId: "gemini-5h",
+        window: "5h",
+        displayName: "Five Hour Limit Remaining",
+        groupName: "Gemini Models",
+        groupDescription: null,
+        bucketDescription: null,
+        remainingFraction: 0.95,
+        resetAt: Date.now() + 3600_000,
+        fetchedAt: Date.now(),
+      },
+      {
+        bucketId: "3p-5h",
+        window: "5h",
+        displayName: "Five Hour Limit Remaining",
+        groupName: "Claude and GPT models",
+        groupDescription: null,
+        bucketDescription: null,
+        remainingFraction: 0.6,
+        resetAt: Date.now() + 1800_000,
+        fetchedAt: Date.now(),
+      },
+    ]);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/accounts/quota",
+      headers: auth,
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as Record<string, any>;
+    expect(body.activeAccounts).toBe(1);
+    expect(body.gemini).toEqual({
+      available: true,
+      "5h": { remainingPercent: 95, resetsIn: expect.any(String) },
+      weekly: { remainingPercent: null, resetsIn: null },
+    });
+    expect(body.claudeGpt).toEqual({
+      available: true,
+      "5h": { remainingPercent: 60, resetsIn: expect.any(String) },
+      weekly: { remainingPercent: null, resetsIn: null },
+    });
+    // In default lean mode, accounts list is omitted
+    expect(body.accounts).toBeUndefined();
+  });
+
+  it("returns detailed pool quota on /accounts/quota?detailed=true", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/accounts/quota?detailed=true",
+      headers: auth,
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as Record<string, any>;
+    expect(body.activeAccounts).toBe(1);
+    expect(Array.isArray(body.accounts)).toBe(true);
+  });
+
+  it("includes lean pool summary on /admin/accounts/quota alongside accounts list", async () => {
+    store.replaceQuota("a1", [
+      {
+        bucketId: "gemini-5h", window: "5h", displayName: null, groupName: "Gemini Models",
+        groupDescription: null, bucketDescription: null, remainingFraction: 0.95,
+        resetAt: Date.now() + 3600_000, fetchedAt: Date.now(),
+      },
+      {
+        bucketId: "gemini-weekly", window: "weekly", displayName: null, groupName: "Gemini Models",
+        groupDescription: null, bucketDescription: null, remainingFraction: 0.8,
+        resetAt: Date.now() + 86400_000, fetchedAt: Date.now(),
+      },
+      {
+        bucketId: "3p-5h", window: "5h", displayName: null, groupName: "Claude and GPT models",
+        groupDescription: null, bucketDescription: null, remainingFraction: 0.6,
+        resetAt: Date.now() + 1800_000, fetchedAt: Date.now(),
+      },
+      {
+        bucketId: "3p-weekly", window: "weekly", displayName: null, groupName: "Claude and GPT models",
+        groupDescription: null, bucketDescription: null, remainingFraction: 0.4,
+        resetAt: Date.now() + 43200_000, fetchedAt: Date.now(),
+      },
+    ]);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/admin/accounts/quota",
+      headers: auth,
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as Record<string, any>;
+    expect(body.activeAccounts).toBe(1);
+    expect(body.gemini.available).toBe(true);
+    expect(body.gemini["5h"].remainingPercent).toBe(95);
+    expect(body.gemini.weekly.remainingPercent).toBe(80);
+    expect(body.claudeGpt.available).toBe(true);
+    expect(body.claudeGpt["5h"].remainingPercent).toBe(60);
+    expect(body.claudeGpt.weekly.remainingPercent).toBe(40);
+    expect(Array.isArray(body.accounts)).toBe(true);
+  });
+
+  it("requires bearer auth on /accounts/quota", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/accounts/quota",
+    });
+    expect(response.statusCode).toBe(401);
+  });
 });

@@ -127,10 +127,22 @@ Force a refresh of that account's quota:
 curl -sS -X POST "$BASE/admin/accounts/account-0000000000000000/refresh" -H "Authorization: Bearer $KEY"
 ```
 
-See the aggregated quota snapshot for the whole pool:
+See the lean quota summary for the whole pool, with Gemini and Claude/GPT limits split into 5-hour and weekly windows:
+
+```bash
+curl -sS "$BASE/accounts/quota" -H "Authorization: Bearer $KEY"
+```
+
+Each family includes `available`, plus `5h` and `weekly` objects containing `remainingPercent` and `resetsIn`. The administrative endpoint retains the per-account quota detail:
 
 ```bash
 curl -sS "$BASE/admin/accounts/quota" -H "Authorization: Bearer $KEY"
+```
+
+To include per-account detail with the lean endpoint, add `?detailed=true`:
+
+```bash
+curl -sS "$BASE/accounts/quota?detailed=true" -H "Authorization: Bearer $KEY"
 ```
 
 Remove the account and its quota rows:

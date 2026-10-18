@@ -13,7 +13,7 @@ import {
 } from "../lib/antigravity/oauth.js";
 import { fetchAvailableModels } from "../lib/antigravity/quota.js";
 import { toIsoUtc, toResetPhrase } from "../lib/format/datetime.js";
-import { toGroupsView } from "../lib/format/quota.js";
+import { toGroupsView, toLeanPoolQuota } from "../lib/format/quota.js";
 import { toOpenAIErrorBody } from "../lib/openai-format/index.js";
 import { getAccountService, getStore } from "../lib/runtime.js";
 import type { Account, AccountStore } from "../lib/accounts/store.js";
@@ -170,11 +170,34 @@ export async function accountsRoutes(app: FastifyInstance, deps: RouteDeps = {})
     reply.status(200).send({ accounts: store.listAccounts().map((account) => publicView(account)) });
   });
 
-  app.get("/admin/accounts/quota", async (_request, reply) => {
+  app.get<{ Querystring: { detailed?: string } }>("/accounts/quota", async (request, reply) => {
     const now = Date.now();
+    const snapshots = store.snapshot();
+    const lean = toLeanPoolQuota(snapshots, now);
+
+    if (request.query?.detailed === "true") {
+      reply.status(200).send({
+        ...lean,
+        accounts: snapshots.map((account) => ({
+          ...publicView(account, now),
+          groups: toGroupsView(account.quota, now),
+          quotaSummaryError: account.quotaSummaryError,
+        })),
+      });
+      return;
+    }
+
+    reply.status(200).send(lean);
+  });
+
+  app.get<{ Querystring: { detailed?: string } }>("/admin/accounts/quota", async (_request, reply) => {
+    const now = Date.now();
+    const snapshots = store.snapshot();
+    const lean = toLeanPoolQuota(snapshots, now);
+
     reply.status(200).send({
-      generatedAt: toIsoUtc(now),
-      accounts: store.snapshot().map((account) => ({
+      ...lean,
+      accounts: snapshots.map((account) => ({
         ...publicView(account, now),
         groups: toGroupsView(account.quota, now),
         quotaSummaryError: account.quotaSummaryError,

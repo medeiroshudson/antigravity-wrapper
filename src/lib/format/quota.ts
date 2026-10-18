@@ -19,10 +19,15 @@ export interface GroupView {
   buckets: BucketView[];
 }
 
+export interface WindowQuotaSummary {
+  remainingPercent: number | null;
+  resetsIn: string | null;
+}
+
 export interface FamilyQuotaSummary {
   available: boolean;
-  remainingPercent: number;
-  resetsIn: string | null;
+  "5h": WindowQuotaSummary;
+  weekly: WindowQuotaSummary;
 }
 
 export interface LeanPoolQuota {
@@ -33,13 +38,8 @@ export interface LeanPoolQuota {
 }
 
 /**
- * Assembles a lean summary of Gemini and Claude/GPT quota across all active accounts in the pool.
- *
- * - Active accounts: `enabled === true && status !== "invalid"` (expired cooldowns are treated as active).
- * - For each family:
- *   - `available`: true if at least one active account has usable quota (> 0%) for that family.
- *   - `remainingPercent`: best remaining percentage among active accounts with measured quota (0..100).
- *   - `resetsIn`: human-readable time remaining until the earliest quota reset among depleted/partially-used buckets.
+ * Assembles a lean summary of Gemini and Claude/GPT quota across all active accounts in the pool,
+ * broken down by the two authoritative windows: 5h and weekly.
  */
 export function toLeanPoolQuota(
   accounts: readonly AccountSnapshot[],
@@ -51,48 +51,60 @@ export function toLeanPoolQuota(
     return true;
   });
 
-  const summarizeFamily = (prefix: string): FamilyQuotaSummary => {
-    let bestFraction = 0;
-    let hasKnownQuota = false;
-    let earliestResetAt: number | null = null;
+  const summarizeWindow = (
+    accounts: readonly AccountSnapshot[],
+    prefix: string,
+    windowName: string,
+  ): WindowQuotaSummary => {
+    const windowBuckets = accounts.flatMap((account) => {
+      const inActiveCooldown = account.status === "cooldown" && (account.cooldownUntil ?? 0) > now;
+      return account.quota
+        .filter(
+          (bucket) =>
+            bucket.bucketId.startsWith(prefix) &&
+            bucket.window.toLowerCase() === windowName.toLowerCase(),
+        )
+        .map((bucket) => ({
+          bucket,
+          remainingFraction: inActiveCooldown ? 0 : bucket.remainingFraction,
+        }));
+    });
 
-    for (const account of active) {
-      const familyBuckets = account.quota.filter((b) => b.bucketId.startsWith(prefix));
-      if (familyBuckets.length === 0) continue;
-
-      hasKnownQuota = true;
-
-      // The account's effective quota for this family is the lowest remainingFraction across its buckets
-      const accountLowest = familyBuckets.reduce(
-        (lowest, b) => Math.min(lowest, b.remainingFraction),
-        1,
-      );
-
-      // If the account is in active cooldown, but this family has 0 quota or cooldown applies
-      const inCooldown = account.status === "cooldown" && (account.cooldownUntil ?? 0) > now;
-      const effectiveFraction = inCooldown && accountLowest <= 0 ? 0 : accountLowest;
-
-      if (effectiveFraction > bestFraction) {
-        bestFraction = effectiveFraction;
-      }
-
-      // Check reset times for buckets that are partially or fully consumed (< 100%)
-      for (const bucket of familyBuckets) {
-        if (bucket.remainingFraction < 1 && bucket.resetAt !== null && bucket.resetAt > now) {
-          if (earliestResetAt === null || bucket.resetAt < earliestResetAt) {
-            earliestResetAt = bucket.resetAt;
-          }
-        }
-      }
+    if (windowBuckets.length === 0) {
+      return { remainingPercent: null, resetsIn: null };
     }
 
-    const available = hasKnownQuota && bestFraction > 0;
-    const remainingPercent = Math.max(0, Math.min(100, Math.round(bestFraction * 100)));
+    const bestFraction = Math.max(...windowBuckets.map(({ remainingFraction }) => remainingFraction));
+    const resetAt = windowBuckets
+      .filter(({ remainingFraction, bucket }) =>
+        remainingFraction === bestFraction && bucket.resetAt !== null && bucket.resetAt > now,
+      )
+      .reduce<number | null>(
+        (earliest, { bucket }) =>
+          earliest === null || (bucket.resetAt !== null && bucket.resetAt < earliest)
+            ? bucket.resetAt
+            : earliest,
+        null,
+      );
 
     return {
-      available,
-      remainingPercent,
-      resetsIn: toResetPhrase(earliestResetAt, now),
+      remainingPercent: Math.max(0, Math.min(100, Math.round(bestFraction * 100))),
+      resetsIn: toResetPhrase(resetAt, now),
+    };
+  };
+
+  const summarizeFamily = (prefix: string): FamilyQuotaSummary => {
+    const accountsWithUsableQuota = active.filter((account) => {
+      const familyBuckets = account.quota.filter((bucket) => bucket.bucketId.startsWith(prefix));
+      if (familyBuckets.length === 0) return false;
+      const inActiveCooldown = account.status === "cooldown" && (account.cooldownUntil ?? 0) > now;
+      return !inActiveCooldown && familyBuckets.every((bucket) => bucket.remainingFraction > 0);
+    });
+
+    return {
+      available: accountsWithUsableQuota.length > 0,
+      "5h": summarizeWindow(active, prefix, "5h"),
+      weekly: summarizeWindow(active, prefix, "weekly"),
     };
   };
 
