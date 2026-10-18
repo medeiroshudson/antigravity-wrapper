@@ -120,9 +120,16 @@ Rules:
 - `reason` short English phrases in i18n (`warn.*` keys, one per class).
 - warnings do not invalidate the response; they are metadata. No new HTTP
   status is introduced by D1.
-- Non-stream: `warnings[]` top-level on `chat.completion`. Stream: once,
-  attached to the final chunk (the same one that carries usage, D4), so no
-  extra frame type exists.
+- Non-stream: `warnings[]` top-level on `chat.completion`. Stream: warnings
+  ride the **finish-reason chunk** (the last `choices`-bearing frame before
+  `[DONE]`) — that chunk exists in every stream, so the policy is uniform and
+  there is no extra frame type. When `include_usage` is on, the usage chunk
+  also carries the same `warnings[]` (belt-and-suspenders, so a client that
+  reads only the usage frame still sees them). A stream with no warnings is
+  byte-identical to today (G6). A client that never requested usage but
+  receives the finish-reason chunk today will find the extra optional key;
+  OpenAI chunk shapes tolerate additive optional fields — the only strict
+  break is byte-equality test suites (§9).
 
 ## 6. Request fields (D2–D6)
 
@@ -188,6 +195,12 @@ thinkingBudget/maxOutputTokens reconciliation and keep it single-sourced.
   field being silently ignored upstream is exactly today's behavior plus a
   D1 warning**, so shipping the mapping un-probed is safe either way; the
   probe only decides whether documentation promises the truncation.
+- **Per-request warning policy (D3 field only):** until the probe confirms
+  honoring, a mapped `stop` carries a Standing warning ("stop requested; upstream
+  honoring is unverified — the delimiter may appear in content"), and after a
+  passing probe the warning is removed (doc becomes the contract). This is
+  one field, not a policy: every other mapped field (D2, D4) has HIGH
+  evidence, so no warning is warranted there.
 - Do not invent `candidate.stopSequence` downstream: only the finish reason is
   preserved (CLIProxyAPI PR #5230 precedent — the channel sometimes omits
   finishReason entirely; their synthesized STOP is why D7's map keeps a
@@ -214,6 +227,12 @@ The plan:
     D4a without the probe is defensible, but the probe still runs first
     (minutes) because a rejected field would 400 *every* json-mode request
     the caller makes, which is worse than today's free text.
+  - **Builder-access contingency:** if the probe cannot run at build time
+    (no available account), ship **D4a behind a one-line kill switch** in
+    `config/index.ts` (`GENERATION_CONFIG_MAP=off` skips the mapping and
+    emits the D4b warning instead) and run the probe before the next real
+    use. The kill switch is the documented rollback if any account tier
+    starts 400ing json-mode requests — nothing else changes.
 - **Schema sanitization is mandatory** (channel 400-matrix from the
   reverse-engineered spec): `type/properties/required/description/enum/
   items/anyOf/allOf/oneOf/additionalProperties` survive; `const`, `$ref`,
@@ -228,6 +247,22 @@ The plan:
   the intent).
 - OpenAI `type:"text"` → no-op, no warning.
 
+### Family coverage (D2–D4 scope decision)
+
+All model families share ONE request path (`turn.ts:221-234` — a single
+`buildEnvelope` → `streamGenerate(${endpoint}/v1internal:streamGenerateContent?alt=sse)`,
+no per-family fork; the only family-specific treatment today is
+`used_claude`/`used_non_gemini_model` labels and the tools schema encoding).
+The mapping is therefore **uniform across families** (no scoping): a
+claude/gpt runtime rejecting `temperature` would surface as a `client_error`
+400 under existing classification, not silent corruption — same failure mode
+the probes already cover. Windows: keep the §11 probe pointed at one Gemini
+runtime first (all cited evidence), then one claude runtime and one gpt
+runtime for a 2-minute acceptance check each (200 vs 400 is all that is
+needed). Chris's note: if any non-Gemini family 400s a mapped field, scope
+that field per-family at build time — the builder gate keeps it a content
+decision, not a design one.
+
 ### D5. Declared-ignored fields (warn only)
 
 `n`, `presence_penalty`, `frequency_penalty`, `logit_bias`, `logprobs`,
@@ -237,6 +272,18 @@ Implementation: one constant list of field names checked against the parsed
 body; each present-but-unsupported field appends its warning. i18n: one
 shared phrase, parameterised by field name, plus a per-field note where a
 phrase would otherwise mislead (`n` → "only one choice is returned").
+
+**Schema strictness (builder Q3, settled):** the body schema stays
+**permissive** (no `additionalProperties: false`). A field outside the mapped
+set and outside the D5 list gets a **single generic warning** (`field:
+"<name>", reason: "field is not recognized by the wrapper and was ignored"`).
+Rationale: `additionalProperties:false` would 400 client typos and
+not-yet-invented OpenAI fields — precisely the workflow-breaking behavior D1
+rejects — while the generic warning keeps G5's zero-silent guarantee without
+requiring the D5 list to be exhaustive. The D5 list exists to give those
+fields *specific* explanations; unrecognized ones get the generic one.
+Auth/transport errors keep existing strictness (Fastify schema for
+`model`/`messages` required, and 400 for malformed JSON, unchanged).
 
 ### D6. `reasoning_effort` strictness
 
@@ -423,13 +470,26 @@ The probe cost is minutes and converts the remaining "medium/low confidence"
 cells into measured decisions — consistent with how this project already
 works (specs refined by live probe, e.g. the 2026-10-13 quota spec).
 
-## 12. What's left to the builder
+## 12. What's left to the builder (and what was settled)
 
+Post-builder-check dispositions:
+
+- **Answered already (this conversation/repo):** family coverage (§6 — one
+  path, uniform mapping, 2-minute per-family probe check), streaming-warning
+  carrier (§5 — finish-reason chunk), schema strictness (§6 D5 — permissive
+  + generic warning), D4 probe-access default (§6 D4 — D4a + kill switch).
+- **Settled by the builder's check as minor, marked as calls (not the
+  human's):** D3 standing warning until probe (§6 D3); D5 list not required
+  to be exhaustive (§6 D5).
+- **Theirs (only the human can answer):** availability of a dev account to
+  run the §11 probe (the D4 kill-switch default makes this non-blocking).
 - Exact i18n key names and phrasing (en-US only, matching existing style).
 - The `warnings[]` TS type (suggested: `{field: string; reason: string}`)
   and where it lives (`openai-format` or a new `translate/diagnostics.ts`).
 - Whether the declared-ignored field list should live in config (env) for
-  silencing — our call: no, keep it a constant; no env knob without need.
+  silencing — our call: no, keep it a constant; no env knob without need
+  (the D4 kill switch exists only because its failure mode is a 400 on
+  every json-mode request, which is a different class).
 - Chunk ordering details in D9 when usage + warnings coexist (they share
   the final frame; document the decided shape in a test).
 - The probe script's exact argument handling (§11).
