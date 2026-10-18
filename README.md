@@ -28,6 +28,8 @@ what you can spend is the sum of every account in the pool.
 - [Using it from an OpenAI client](#using-it-from-an-openai-client)
 - [Models and reasoning effort](#models-and-reasoning-effort)
 - [Tool calling](#tool-calling)
+- [Web search grounding](#web-search-grounding)
+- [Image generation](#image-generation)
 - [Configuration](#configuration)
 - [How load balancing works](#how-load-balancing-works)
 - [Security and operations](#security-and-operations)
@@ -771,6 +773,119 @@ to accept the request and then silently not call the tool.
 
 ---
 
+## Web search grounding
+
+The wrapper supports **direct Google Search Grounding** within `POST /v1/chat/completions`. Upstream Google Antigravity autonomously evaluates whether real-time information is needed, queries Google Search servers internally in real time, and synthesizes an up-to-date answer accompanied by web citations — without requiring external scraping tools or third-party search API keys.
+
+### Enabling search
+
+Pass `web_search: true` or `web_search_options: {}` in the chat request body:
+
+```bash
+curl -s http://127.0.0.1:3000/v1/chat/completions \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-3.5-flash-lite",
+    "messages": [{"role": "user", "content": "Quem venceu o Prêmio Nobel de Literatura em 2024?"}],
+    "web_search": true
+  }'
+```
+
+To enable Google Search Grounding globally for all Gemini chat requests by default without client changes, set `ANTIGRAVITY_SEARCH_AUTO=true` in your environment.
+
+### Citations and Grounding Metadata
+
+1. **Markdown Citations Footer:** When web searches occur, the wrapper appends a deduplicated Markdown citations section (`### Fontes consultadas` or localized per `APP_LOCALE`) at the end of the text response, using official Google Vertex AI Search secure redirect links:
+   ```markdown
+   O Prêmio Nobel de Literatura de 2024 foi concedido à escritora sul-coreana Han Kang...
+
+   ---
+   ### Fontes consultadas
+   - [nobelprize.org](https://vertexaisearch.cloud.google.com/grounding-api-redirect/...)
+   - [globo.com](https://vertexaisearch.cloud.google.com/grounding-api-redirect/...)
+   ```
+2. **Streaming Support:** In streaming mode (`stream: true`), text tokens stream in real time. When generation ends, the citations block is delivered as an extra text delta chunk before `finish_reason: "stop"`, followed by structured `grounding_metadata` attached to the final SSE chunk delta.
+3. **Structured Metadata:** For programmatic consumers, `choices[0].message.grounding_metadata` (non-stream) and `choices[0].delta.grounding_metadata` (stream final chunk) contain:
+   ```json
+   {
+     "webSearchQueries": ["Nobel de Literatura 2024 vencedor"],
+     "sources": [
+       { "title": "nobelprize.org", "url": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/..." }
+     ]
+   }
+   ```
+4. **Coexistence with Function Calling:** Custom client tools (`tools: [...]`) and `web_search: true` coexist seamlessly. Upstream runs web grounding internally and emits `tool_calls` only for your custom declared functions.
+5. **Model Support:** Search grounding is supported on Gemini models (`gemini-3.8-flash-*`, `gemini-3.5-flash-*`, `gemini-2.5-flash-*`, `gemini-3-flash`). If `web_search: true` is passed to Claude or GPT-OSS models, the request completes normally and a non-fatal diagnostic warning is emitted in the `warnings[]` array.
+
+---
+
+## Image generation
+
+The wrapper implements the standard OpenAI image generation endpoint `POST /v1/images/generations`, backed by the private upstream `gemini-3.1-flash-image` model.
+
+### Basic usage
+
+```bash
+curl -s http://127.0.0.1:3000/v1/images/generations \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "A futuristic cyberpunk city bathed in neon lights at dusk, cinematic 4k",
+    "size": "1024x1024",
+    "response_format": "b64_json"
+  }'
+```
+
+```json
+{
+  "created": 1729285000,
+  "data": [
+    {
+      "b64_json": "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBD...",
+      "revised_prompt": "A futuristic cyberpunk city bathed in neon lights at dusk, cinematic 4k"
+    }
+  ]
+}
+```
+
+### Models and parameters
+
+- **Model:** Accepts `gemini-3.1-flash-image` (default when `model` is omitted). Other model names return HTTP 400 because Google Antigravity only supports image synthesis on this dedicated model.
+- **Aspect Ratio & Size:** Standard OpenAI `size` strings are translated automatically into upstream aspect ratios:
+  - `"1024x1024"`, `"512x512"`, `"256x256"`, `"square"`, or omitted &rarr; `1:1`
+  - `"1024x1792"`, `"720x1280"`, `"portrait"` &rarr; `9:16`
+  - `"1792x1024"`, `"1280x720"`, `"landscape"` &rarr; `16:9`
+  - Unrecognized sizes fall back to `1:1` with a non-fatal warning.
+- **Multiple Images (`n`):** Accepts `n` between `1` and `4` (default `1`). Images are generated sequentially across eligible accounts in the pool.
+- **Delivery Formats (`response_format`):**
+  - `"b64_json"` (default): Returns base64 JPEG data directly in `data[].b64_json`.
+  - `"url"`: Returns an RFC 2397 Data URI in `data[].url` (`data:image/jpeg;base64,...`), providing instant preview and download compatibility in web UIs without external S3/GCS hosting.
+- **Account Pool & Failover:** Image generation participates in pool load balancing against the Gemini quota bucket (`gemini-5h` / `gemini-weekly`) with automatic failover across accounts on HTTP 429/5xx.
+- **Safety Handling:** When a prompt violates upstream content policies, the service immediately returns HTTP 400 `invalid_request_error` with `code: "content_policy_violation"` without burning pool quota or failing over to subsequent accounts.
+
+### Using with the OpenAI Python SDK
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://127.0.0.1:3000/v1",
+    api_key="your-wrapper-api-key",
+)
+
+response = client.images.generate(
+    model="gemini-3.1-flash-image",
+    prompt="A cozy cabin in a snowy pine forest at sunrise",
+    size="1024x1024",
+    response_format="b64_json",
+)
+
+image_base64 = response.data[0].b64_json
+```
+
+---
+
 ## Configuration
 
 All configuration is environment variables. Names are listed in `.env.example`; no secret
@@ -785,6 +900,7 @@ is embedded in the code.
 | `ANTIGRAVITY_CLIENT_SECRET` | — | OAuth client secret (required) |
 | `ANTIGRAVITY_BASE_URL` | — | Override the upstream base; `https` only, host must be `*.googleapis.com` |
 | `ANTIGRAVITY_USER_AGENT` | CLI 1.2.4 fingerprint | Override the request fingerprint |
+| `ANTIGRAVITY_SEARCH_AUTO` | `false` | Enable Google Search Grounding by default on all Gemini chat requests |
 | `UPSTREAM_TIMEOUT_MS` | `120000` | Upstream request timeout |
 | `STREAM_HEADER_TIMEOUT_MS` | `180000` | Deadline for the stream's response headers |
 | `STREAM_STALL_TIMEOUT_MS` | `120000` | Deadline for silence mid-stream |
