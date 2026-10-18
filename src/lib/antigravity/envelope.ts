@@ -20,6 +20,10 @@ export type GeminiPart =
 export type GeminiRole = "user" | "model";
 export interface GeminiContent { role: GeminiRole; parts: GeminiPart[] }
 
+export type GeminiTool =
+  | { functionDeclarations: unknown[] }
+  | { googleSearch: Record<string, unknown> };
+
 export interface GeminiRequestBody {
   contents: GeminiContent[];
   systemInstruction: { role: "user"; parts: GeminiTextPart[] };
@@ -33,7 +37,7 @@ export interface GeminiRequestBody {
     responseMimeType?: string;
     responseSchema?: unknown;
   };
-  tools?: { functionDeclarations: unknown[] }[];
+  tools?: GeminiTool[];
   sessionId?: string;
   labels?: Record<string, string>;
 }
@@ -60,7 +64,8 @@ export interface EnvelopeInput {
   stopSequences?: string[];
   responseMimeType?: string;
   responseSchema?: unknown;
-  tools?: { functionDeclarations: unknown[] }[];
+  tools?: GeminiTool[];
+  enableWebSearch?: boolean;
   sessionId: string;
   labels: Record<string, string>;
   requestId: string;
@@ -138,7 +143,16 @@ export function buildEnvelope(input: EnvelopeInput): AntigravityRequest {
     labels: input.labels,
     sessionId: input.sessionId,
   };
-  if (input.tools && input.tools.length > 0) request.tools = input.tools;
+  const tools: GeminiTool[] = [];
+  if (input.enableWebSearch && input.runtimeModel.startsWith("gemini-")) {
+    tools.push({ googleSearch: {} });
+  }
+  if (input.tools && input.tools.length > 0) {
+    tools.push(...input.tools);
+  }
+  if (tools.length > 0) {
+    request.tools = tools;
+  }
 
   return {
     project: input.projectId,
