@@ -61,6 +61,9 @@ const enUS = {
   "chat.streamWithoutFinishReason": "stream ended without finishReason",
   "chat.clientDisconnected": "client disconnected",
 
+  // --- search grounding ----------------------------------------------------
+  "search.sources": "Fontes consultadas",
+
   // --- upstream transport --------------------------------------------------
   "upstream.cancelledByClient": "stream request cancelled by the client",
   "upstream.readAborted": "stream read aborted",
