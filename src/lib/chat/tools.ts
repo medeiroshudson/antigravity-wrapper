@@ -75,7 +75,7 @@ function resolveLocalPointer(ref: string, root: unknown): unknown {
  * `examples`, `properties` values), so it cannot carry the meaning of
  * failure: using it as the sentinel would make a valid tool vanish silently.
  */
-const UNRESOLVED = Symbol("unresolved");
+export const UNRESOLVED = Symbol("unresolved");
 
 /** Reduces the schema to the legacy allowlist. Property names are NOT filtered. */
 function toLegacySchema(schema: unknown, droppedKeywords?: Set<string>): unknown {
@@ -111,7 +111,7 @@ function toLegacySchema(schema: unknown, droppedKeywords?: Set<string>): unknown
  * resolve (or there is a cycle). A literal `null` passes through as ordinary
  * content.
  */
-function dereference(schema: unknown, root: unknown, seen: Set<string> = new Set()): unknown {
+export function dereference(schema: unknown, root: unknown = schema, seen: Set<string> = new Set()): unknown {
   if (Array.isArray(schema)) {
     const out: unknown[] = [];
     for (const item of schema) {
@@ -144,7 +144,7 @@ function dereference(schema: unknown, root: unknown, seen: Set<string> = new Set
 
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(record)) {
-    if (key === "$defs" || key === "definitions" || key === "$schema") continue;
+    if (key === "$defs" || key === "definitions") continue;
     const resolved = dereference(value, root, seen);
     if (resolved === UNRESOLVED) return UNRESOLVED;
     out[key] = resolved;
@@ -193,7 +193,7 @@ export function buildFunctionDeclarations(
     if (dereferenced === UNRESOLVED) {
       diagnostics.push({
         field: `tools[${i}].function.name:${name}`,
-        reason: `Tool '${name}' was omitted: unresolvable $ref`,
+        reason: t("warn.toolOmittedRef", { name }),
       });
       continue;
     }

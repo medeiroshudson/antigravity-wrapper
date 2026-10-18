@@ -1,5 +1,6 @@
 import { t } from "../../i18n/index.js";
 import type { Warning } from "./diagnostics.js";
+import { dereference, UNRESOLVED } from "./tools.js";
 
 /**
  * Disallowed keywords in Google Gemini JSON schemas that must be stripped.
@@ -145,7 +146,15 @@ export function buildResponseFormatConfig(
   let responseSchema: unknown;
 
   if (schemaToSanitize) {
-    const { sanitized, strippedKeywords } = sanitizeResponseSchema(schemaToSanitize);
+    const dereferenced = dereference(schemaToSanitize);
+    const candidate =
+      dereferenced !== UNRESOLVED &&
+      typeof dereferenced === "object" &&
+      dereferenced !== null &&
+      !Array.isArray(dereferenced)
+        ? (dereferenced as Record<string, unknown>)
+        : schemaToSanitize;
+    const { sanitized, strippedKeywords } = sanitizeResponseSchema(candidate);
     responseSchema = sanitized;
     if (strippedKeywords.length > 0) {
       warnings.push({

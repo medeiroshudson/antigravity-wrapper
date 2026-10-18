@@ -1198,6 +1198,67 @@ describe("request logging", () => {
     );
   });
 
+  it("records diagnostic warning when stop parameter is malformed or invalid type", async () => {
+    app = buildServer("test-key", { store, env: ENV, fetchImpl: fetchOk(), logger: false });
+    const responseNumber = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: {
+        model: "gemini-3.8-flash",
+        messages: [{ role: "user", content: "oi" }],
+        stop: 123,
+      },
+    });
+
+    expect(responseNumber.statusCode).toBe(200);
+    expect(responseNumber.json().warnings).toContainEqual(
+      expect.objectContaining({
+        field: "stop",
+        reason: expect.stringMatching(/must be a string or array of strings/),
+      }),
+    );
+
+    const responseNullArray = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: {
+        model: "gemini-3.8-flash",
+        messages: [{ role: "user", content: "oi" }],
+        stop: [null],
+      },
+    });
+
+    expect(responseNullArray.statusCode).toBe(200);
+    expect(responseNullArray.json().warnings).toContainEqual(
+      expect.objectContaining({
+        field: "stop",
+        reason: expect.stringMatching(/must be a string or array of strings/),
+      }),
+    );
+  });
+
+  it("emits explanatory warning when n parameter is provided", async () => {
+    app = buildServer("test-key", { store, env: ENV, fetchImpl: fetchOk(), logger: false });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: {
+        model: "gemini-3.8-flash",
+        messages: [{ role: "user", content: "oi" }],
+        n: 2,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().warnings).toContainEqual({
+      field: "n",
+      reason: "Field 'n' is not supported upstream and was ignored (only one choice is returned)",
+    });
+  });
+
   it("attaches warnings to stream finish-reason chunk and trailing usage chunk", async () => {
     app = buildServer("test-key", { store, env: ENV, fetchImpl: fetchOk(), logger: false });
     const response = await app.inject({

@@ -78,6 +78,137 @@ describe("buildResponseFormatConfig", () => {
       expect.objectContaining({ field: "response_format.type" }),
     );
   });
+
+  it("inlines $ref references from local $defs into properties", () => {
+    const inputSchema = {
+      type: "object",
+      properties: {
+        user: { $ref: "#/$defs/User" },
+      },
+      $defs: {
+        User: {
+          type: "object",
+          properties: {
+            name: { type: "string" },
+            age: { type: "integer" },
+          },
+          required: ["name"],
+        },
+      },
+    };
+    const result = buildResponseFormatConfig(
+      {
+        type: "json_schema",
+        json_schema: { name: "UserPayload", schema: inputSchema },
+      },
+      true,
+    );
+
+    expect(result.responseMimeType).toBe("application/json");
+    expect(result.responseSchema).toEqual({
+      type: "object",
+      properties: {
+        user: {
+          type: "object",
+          properties: {
+            name: { type: "string" },
+            age: { type: "integer" },
+          },
+          required: ["name"],
+        },
+      },
+    });
+    expect(result.warnings).toHaveLength(0);
+  });
+
+  it("inlines $ref references from definitions and handles nested refs", () => {
+    const inputSchema = {
+      type: "object",
+      properties: {
+        order: { $ref: "#/definitions/Order" },
+      },
+      definitions: {
+        Order: {
+          type: "object",
+          properties: {
+            item: { $ref: "#/definitions/Item" },
+          },
+        },
+        Item: {
+          type: "object",
+          properties: {
+            sku: { type: "string" },
+          },
+        },
+      },
+    };
+    const result = buildResponseFormatConfig(
+      {
+        type: "json_schema",
+        json_schema: { name: "OrderPayload", schema: inputSchema },
+      },
+      true,
+    );
+
+    expect(result.responseSchema).toEqual({
+      type: "object",
+      properties: {
+        order: {
+          type: "object",
+          properties: {
+            item: {
+              type: "object",
+              properties: {
+                sku: { type: "string" },
+              },
+            },
+          },
+        },
+      },
+    });
+  });
+
+  it("sanitizes disallowed keywords inside inlined definitions", () => {
+    const inputSchema = {
+      type: "object",
+      properties: {
+        profile: { $ref: "#/$defs/Profile" },
+      },
+      $defs: {
+        Profile: {
+          type: "object",
+          properties: {
+            nickname: { type: "string", default: "anonymous", examples: ["anon1"] },
+          },
+        },
+      },
+    };
+    const result = buildResponseFormatConfig(
+      {
+        type: "json_schema",
+        json_schema: { name: "ProfilePayload", schema: inputSchema },
+      },
+      true,
+    );
+
+    expect(result.responseSchema).toEqual({
+      type: "object",
+      properties: {
+        profile: {
+          type: "object",
+          properties: {
+            nickname: { type: "string" },
+          },
+        },
+      },
+    });
+    expect(result.warnings).toContainEqual(
+      expect.objectContaining({
+        field: "response_format.json_schema",
+        reason: expect.stringMatching(/default|examples/),
+      }),
+    );
+  });
 });
 
 describe("sanitizeResponseSchema", () => {

@@ -192,7 +192,9 @@ export async function chatRoutes(
 
     const warningCollector = new WarningCollector();
     for (const key of Object.keys(body)) {
-      if (DECLARED_IGNORED_FIELDS.includes(key)) {
+      if (key === "n") {
+        warningCollector.add("n", t("warn.ignoredFieldN"));
+      } else if (DECLARED_IGNORED_FIELDS.includes(key)) {
         warningCollector.add(key, t("warn.ignoredField", { field: key }));
       } else if (!KNOWN_BODY_FIELDS.has(key)) {
         warningCollector.add(key, t("warn.unrecognizedField", { field: key }));
@@ -284,10 +286,22 @@ export async function chatRoutes(
 
     let stopSequences: string[] | undefined;
     if (typeof body.stop === "string") {
-      stopSequences = [body.stop];
+      if (body.stop.length > 0) {
+        stopSequences = [body.stop];
+      } else {
+        warningCollector.add("stop", t("warn.invalidStop"));
+      }
     } else if (Array.isArray(body.stop)) {
-      stopSequences = body.stop.filter((s): s is string => typeof s === "string");
+      const valid = body.stop.filter((s): s is string => typeof s === "string" && s.length > 0);
+      if (valid.length > 0) {
+        stopSequences = valid;
+      } else if (body.stop.length > 0) {
+        warningCollector.add("stop", t("warn.invalidStop"));
+      }
+    } else if (body.stop !== undefined && body.stop !== null) {
+      warningCollector.add("stop", t("warn.invalidStop"));
     }
+
     if (stopSequences && stopSequences.length > 0) {
       warningCollector.add("stop", t("warn.unverifiedStop"));
     } else {

@@ -80,7 +80,7 @@ export type ChatCompletionChunk = {
 export interface BuildChunkExtraOpts {
   warnings?: Warning[];
   usage?: CompletionUsage;
-  choices?: any[];
+  choices?: ChatCompletionChunk["choices"];
 }
 
 export interface BuildChunkOptions extends BuildChunkExtraOpts {

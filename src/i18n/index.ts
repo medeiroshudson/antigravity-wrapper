@@ -91,6 +91,10 @@ const enUS = {
   "warn.disabledGenConfig": "generationConfig mapping is disabled by kill-switch",
   "warn.unknownFinishReason": "Unknown finish reason '{reason}' reported as 'stop'",
   "warn.promptBlocked": "Prompt blocked by upstream safety filters: {reason}",
+  "warn.toolOmittedRef": "Tool '{name}' was omitted: unresolvable $ref",
+  "warn.ignoredFieldN":
+    "Field 'n' is not supported upstream and was ignored (only one choice is returned)",
+  "warn.invalidStop": "Field 'stop' must be a string or array of strings and was ignored",
 } as const;
 
 export type MessageKey = keyof typeof enUS;
