@@ -5,10 +5,31 @@ import type { AccountService } from "../accounts/service.js";
 import { buildEnvelope, newRequestIdentity, type GeminiContent } from "../antigravity/envelope.js";
 import { isDefinitive, ClientDisconnectedError, UpstreamError } from "../antigravity/errors.js";
 import { readSse, streamGenerate } from "../antigravity/rpc.js";
-import type { TurnResult } from "../openai-format/index.js";
 import { noopLogger, type Logger } from "../logger.js";
 import { normalizeToolCalls } from "./tools.js";
 import { rememberSignature } from "./signatures.js";
+import type { Warning } from "./diagnostics.js";
+
+export interface TurnUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  prompt_tokens_details?: {
+    cached_tokens: number;
+  };
+  completion_tokens_details?: {
+    reasoning_tokens: number;
+  };
+}
+
+export interface TurnResult {
+  content: string;
+  finishReason: string;
+  usage: TurnUsage | null;
+  toolCalls: Array<{ id: string; name: string; arguments: string; thoughtSignature?: string }>;
+  blockedReason?: string;
+  warnings?: Warning[];
+}
 
 export interface TurnInput {
   runtimeModel: string;
@@ -61,14 +82,20 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 
 /**
  * Maps the backend `finishReason` to the OpenAI vocabulary.
- * `SAFETY`/`RECITATION` are content blocks, not truncations: reporting them as
- * `length` would make the client try to continue a censored response.
+ * Unknown upstream reasons map to "stop" with a diagnostic warning.
+ * `SAFETY`/`RECITATION` are content blocks: reporting them as `content_filter`.
  */
-function mapFinishReason(reason: string): string {
-  if (reason === "STOP") return "stop";
-  if (reason === "MAX_TOKENS") return "length";
-  if (reason === "SAFETY" || reason === "RECITATION") return "content_filter";
-  return "length";
+export function mapFinishReason(raw: string | undefined): { reason: string; warning?: Warning } {
+  if (raw === "STOP") return { reason: "stop" };
+  if (raw === "MAX_TOKENS") return { reason: "length" };
+  if (raw === "SAFETY" || raw === "RECITATION") return { reason: "content_filter" };
+  return {
+    reason: "stop",
+    warning: {
+      field: "finish_reason",
+      reason: t("warn.unknownFinishReason", { reason: raw ?? "undefined" }),
+    },
+  };
 }
 
 /**
@@ -239,14 +266,22 @@ export class TurnRunner {
     });
 
     let content = "";
-    let finishReason = "STOP";
+    let rawFinishReason: string | undefined;
+    let blockedReason: string | undefined;
     let usage: TurnResult["usage"] = null;
     let sawFinish = false;
+    const warnings: Warning[] = [];
     const toolParts: Array<Record<string, unknown>> = [];
 
     try {
       for await (const chunk of readSse(response, { signal: opts.signal, env: this.deps.env, logger: this.logger })) {
         const candidate = chunk.response?.candidates?.[0];
+        const chunkBlocked =
+          candidate?.promptFeedback?.blockReason ?? chunk.response?.promptFeedback?.blockReason;
+        if (chunkBlocked && !blockedReason) {
+          blockedReason = chunkBlocked;
+        }
+
         for (const part of candidate?.content?.parts ?? []) {
           const text = part.text;
           if (typeof text === "string" && text.length > 0 && part.thought !== true) {
@@ -257,7 +292,7 @@ export class TurnRunner {
         }
         if (candidate?.finishReason) {
           sawFinish = true;
-          finishReason = candidate.finishReason;
+          rawFinishReason = candidate.finishReason;
         }
         const meta = chunk.response?.usageMetadata;
         if (meta) {
@@ -265,9 +300,15 @@ export class TurnRunner {
           const cacheRead = meta.cachedContentTokenCount ?? 0;
           const thoughts = meta.thoughtsTokenCount ?? 0;
           usage = {
-            prompt_tokens: prompt - cacheRead,
+            prompt_tokens: prompt,
             completion_tokens: (meta.candidatesTokenCount ?? 0) + thoughts,
             total_tokens: meta.totalTokenCount ?? 0,
+            prompt_tokens_details: {
+              cached_tokens: cacheRead,
+            },
+            completion_tokens_details: {
+              reasoning_tokens: thoughts,
+            },
           };
         }
       }
@@ -278,7 +319,7 @@ export class TurnRunner {
       // nothing at all is a failure. The cost of the trade-off is that a body
       // truncated exactly at a chunk boundary reads as complete — which still hands
       // the caller the text that arrived, instead of a 503 that discards it.
-      if (!sawFinish && content.length === 0 && toolParts.length === 0) {
+      if (!blockedReason && !sawFinish && content.length === 0 && toolParts.length === 0) {
         throw new UpstreamError("server_error", 0, t("chat.streamWithoutFinishReason"));
       }
     } catch (error) {
@@ -304,6 +345,21 @@ export class TurnRunner {
       throw failure;
     }
 
+    if (blockedReason) {
+      warnings.push({
+        field: "promptFeedback",
+        reason: t("warn.promptBlocked", { reason: blockedReason }),
+      });
+      return {
+        content: "",
+        finishReason: "content_filter",
+        usage,
+        toolCalls: [],
+        blockedReason,
+        warnings,
+      };
+    }
+
     // `normalizeToolCalls` returns the nested OpenAI shape (function.{name,arguments});
     // `TurnResult` expects the flattened shape `buildCompletion` consumes, preserving
     // the `thoughtSignature` for multi-turn continuity (spec §15).
@@ -319,11 +375,25 @@ export class TurnRunner {
       if (call.id && call.thoughtSignature) rememberSignature(call.id, call.thoughtSignature);
     }
 
+    let finishReason: string;
+    if (rawFinishReason === "SAFETY" || rawFinishReason === "RECITATION") {
+      finishReason = "content_filter";
+    } else if (toolCalls.length > 0) {
+      finishReason = "tool_calls";
+    } else {
+      const mapped = mapFinishReason(rawFinishReason);
+      finishReason = mapped.reason;
+      if (mapped.warning) {
+        warnings.push(mapped.warning);
+      }
+    }
+
     return {
       content,
-      finishReason: toolCalls.length > 0 ? "tool_calls" : mapFinishReason(finishReason),
+      finishReason,
       usage,
       toolCalls,
+      ...(warnings.length > 0 ? { warnings } : {}),
     };
   }
 }

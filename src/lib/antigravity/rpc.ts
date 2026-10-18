@@ -121,10 +121,15 @@ export interface StreamCandidate {
   content?: { parts?: Array<Record<string, unknown>> };
   finishReason?: string;
   groundingMetadata?: unknown;
+  promptFeedback?: { blockReason?: string };
 }
 
 export interface StreamChunk {
-  response?: { candidates?: StreamCandidate[]; usageMetadata?: UsageMetadata };
+  response?: {
+    candidates?: StreamCandidate[];
+    usageMetadata?: UsageMetadata;
+    promptFeedback?: { blockReason?: string };
+  };
 }
 
 function parseSseLine(line: string): StreamChunk | null {
@@ -132,7 +137,23 @@ function parseSseLine(line: string): StreamChunk | null {
   const payload = line.slice(5).trim();
   if (!payload || payload === "[DONE]") return null;
   try {
-    return JSON.parse(payload) as StreamChunk;
+    const parsed = JSON.parse(payload) as StreamChunk;
+    const promptFeedback =
+      parsed.response?.promptFeedback ??
+      ((parsed as Record<string, unknown>).promptFeedback as { blockReason?: string } | undefined);
+
+    if (promptFeedback) {
+      parsed.response ??= {};
+      parsed.response.promptFeedback ??= promptFeedback;
+      if (!parsed.response.candidates || parsed.response.candidates.length === 0) {
+        parsed.response.candidates = [{ promptFeedback }];
+      } else {
+        for (const candidate of parsed.response.candidates) {
+          candidate.promptFeedback ??= promptFeedback;
+        }
+      }
+    }
+    return parsed;
   } catch {
     return null;
   }

@@ -103,7 +103,31 @@ describe("TurnRunner", () => {
     expect(accountId).toBe("a1");
     expect(result.content).toBe("ola");
     expect(result.finishReason).toBe("stop");
-    expect(result.usage).toEqual({ prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 });
+    expect(result.usage).toEqual({
+      prompt_tokens: 5,
+      completion_tokens: 1,
+      total_tokens: 6,
+      prompt_tokens_details: { cached_tokens: 0 },
+      completion_tokens_details: { reasoning_tokens: 0 },
+    });
+  });
+
+  it("computes gross prompt_tokens and token details in usage", async () => {
+    const sseChunks = [
+      'data: {"response":{"candidates":[{"content":{"parts":[{"text":"hi"}]}}]}}\n\n',
+      'data: {"response":{"candidates":[{"content":{"parts":[]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"cachedContentTokenCount":4,"thoughtsTokenCount":2,"totalTokenCount":17}}}\n\n',
+      "data: [DONE]\n\n",
+    ];
+    const fetchImpl = vi.fn(async () => sse(sseChunks)) as unknown as typeof fetch;
+    const runner = new TurnRunner({ accounts: service([snapshot("a1")]), fetchImpl });
+    const { result } = await runner.run(BASE);
+    expect(result.usage).toEqual({
+      prompt_tokens: 10,
+      completion_tokens: 7,
+      total_tokens: 17,
+      prompt_tokens_details: { cached_tokens: 4 },
+      completion_tokens_details: { reasoning_tokens: 2 },
+    });
   });
 
   it("emits deltas through onDelta", async () => {
@@ -429,6 +453,25 @@ describe("TurnRunner", () => {
       const { result } = await runner.run(BASE);
       expect(result.finishReason).toBe(expected);
     }
+  });
+
+  it("maps unknown finishReason to stop with a warning", async () => {
+    const fetchImpl = vi.fn(async () =>
+      sse([
+        'data: {"response":{"candidates":[{"content":{"parts":[{"text":"oi"}]}}]}}\n\n',
+        'data: {"response":{"candidates":[{"content":{"parts":[]},"finishReason":"OTHER"}]}}\n\n',
+        "data: [DONE]\n\n",
+      ]),
+    ) as unknown as typeof fetch;
+    const runner = new TurnRunner({ accounts: service([snapshot("a1")]), fetchImpl });
+    const { result } = await runner.run(BASE);
+    expect(result.finishReason).toBe("stop");
+    expect(result.warnings).toContainEqual(
+      expect.objectContaining({
+        field: "finish_reason",
+        reason: expect.stringContaining("OTHER"),
+      }),
+    );
   });
 
   it("a 429 triggers a best-effort quota refresh of the affected account", async () => {

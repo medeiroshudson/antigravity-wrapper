@@ -89,6 +89,8 @@ const enUS = {
   "warn.unverifiedStop":
     "Stop requested; upstream honoring is unverified -- the delimiter may appear in content",
   "warn.disabledGenConfig": "generationConfig mapping is disabled by kill-switch",
+  "warn.unknownFinishReason": "Unknown finish reason '{reason}' reported as 'stop'",
+  "warn.promptBlocked": "Prompt blocked by upstream safety filters: {reason}",
 } as const;
 
 export type MessageKey = keyof typeof enUS;
