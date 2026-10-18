@@ -187,3 +187,8 @@ export function maskEmail(email: string | undefined): string | undefined {
   const masked = name.length > 2 ? `${name[0]}***${name.at(-1)}` : `${name[0]}***`;
   return `${masked}@${domain}`;
 }
+
+export function isGenerationConfigMapEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.GENERATION_CONFIG_MAP !== "off";
+}
+

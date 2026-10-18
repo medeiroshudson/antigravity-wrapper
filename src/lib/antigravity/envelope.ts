@@ -26,6 +26,12 @@ export interface GeminiRequestBody {
   generationConfig?: {
     maxOutputTokens?: number;
     thinkingConfig?: { includeThoughts: boolean; thinkingBudget: number };
+    temperature?: number;
+    topP?: number;
+    topK?: number;
+    stopSequences?: string[];
+    responseMimeType?: string;
+    responseSchema?: unknown;
   };
   tools?: { functionDeclarations: unknown[] }[];
   sessionId?: string;
@@ -48,6 +54,12 @@ export interface EnvelopeInput {
   systemInstruction: string;
   thinking: { includeThoughts: boolean; thinkingBudget: number };
   maxOutputTokens: number;
+  temperature?: number;
+  topP?: number;
+  topK?: number;
+  stopSequences?: string[];
+  responseMimeType?: string;
+  responseSchema?: unknown;
   tools?: { functionDeclarations: unknown[] }[];
   sessionId: string;
   labels: Record<string, string>;
@@ -96,13 +108,33 @@ export function newRequestIdentity(
 }
 
 export function buildEnvelope(input: EnvelopeInput): AntigravityRequest {
+  const generationConfig: NonNullable<GeminiRequestBody["generationConfig"]> = {
+    maxOutputTokens: input.maxOutputTokens,
+    thinkingConfig: input.thinking,
+  };
+  if (input.temperature !== undefined) {
+    generationConfig.temperature = input.temperature;
+  }
+  if (input.topP !== undefined) {
+    generationConfig.topP = input.topP;
+  }
+  if (input.topK !== undefined) {
+    generationConfig.topK = input.topK;
+  }
+  if (input.stopSequences && input.stopSequences.length > 0) {
+    generationConfig.stopSequences = input.stopSequences;
+  }
+  if (input.responseMimeType !== undefined) {
+    generationConfig.responseMimeType = input.responseMimeType;
+  }
+  if (input.responseSchema !== undefined) {
+    generationConfig.responseSchema = input.responseSchema;
+  }
+
   const request: GeminiRequestBody = {
     contents: input.contents,
     systemInstruction: { role: "user", parts: [{ text: input.systemInstruction }] },
-    generationConfig: {
-      maxOutputTokens: input.maxOutputTokens,
-      thinkingConfig: input.thinking,
-    },
+    generationConfig,
     labels: input.labels,
     sessionId: input.sessionId,
   };
