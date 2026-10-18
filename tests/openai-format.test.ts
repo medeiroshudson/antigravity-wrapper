@@ -60,6 +60,59 @@ describe("buildCompletion", () => {
     );
     expect(withSig.choices[0]?.message.tool_calls?.[0]?.thoughtSignature).toBe("SIG");
   });
+
+  it("attaches warnings to top level of completion when non-empty", () => {
+    const out = buildCompletion(
+      {
+        content: "hello",
+        finishReason: "stop",
+        usage: null,
+        toolCalls: [],
+      },
+      "gemini-3.8-flash",
+      [{ field: "seed", reason: "ignored" }],
+    );
+    expect(out.warnings).toEqual([{ field: "seed", reason: "ignored" }]);
+  });
+
+  it("omits warnings from top level when empty or undefined", () => {
+    const withoutWarnings = buildCompletion(
+      {
+        content: "hello",
+        finishReason: "stop",
+        usage: null,
+        toolCalls: [],
+      },
+      "gemini-3.8-flash",
+    );
+    expect(withoutWarnings).not.toHaveProperty("warnings");
+
+    const withEmptyWarnings = buildCompletion(
+      {
+        content: "hello",
+        finishReason: "stop",
+        usage: null,
+        toolCalls: [],
+      },
+      "gemini-3.8-flash",
+      [],
+    );
+    expect(withEmptyWarnings).not.toHaveProperty("warnings");
+  });
+
+  it("includes warnings from result.warnings if present", () => {
+    const out = buildCompletion(
+      {
+        content: "hello",
+        finishReason: "stop",
+        usage: null,
+        toolCalls: [],
+        warnings: [{ field: "temperature", reason: "adjusted" }],
+      },
+      "gemini-3.8-flash",
+    );
+    expect(out.warnings).toEqual([{ field: "temperature", reason: "adjusted" }]);
+  });
 });
 
 describe("buildChunk and sseEvent", () => {
@@ -67,6 +120,27 @@ describe("buildChunk and sseEvent", () => {
     const chunk = buildChunk("chatcmpl-1", "m", 1, { content: "oi" }, null);
     expect(chunk.object).toBe("chat.completion.chunk");
     expect(chunk.choices[0]?.delta.content).toBe("oi");
+    expect(chunk).not.toHaveProperty("warnings");
+    expect(chunk).not.toHaveProperty("usage");
+  });
+
+  it("attaches warnings and usage to chunk when provided in options", () => {
+    const chunk = buildChunk("chatcmpl-1", "m", 1, { content: "" }, "stop", {
+      warnings: [{ field: "seed", reason: "ignored" }],
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+    });
+    expect(chunk.warnings).toEqual([{ field: "seed", reason: "ignored" }]);
+    expect(chunk.usage).toEqual({ prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
+    expect(chunk.choices[0]?.finish_reason).toBe("stop");
+  });
+
+  it("allows custom choices such as choices: [] in options", () => {
+    const chunk = buildChunk("chatcmpl-1", "m", 1, {}, null, {
+      choices: [],
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+    });
+    expect(chunk.choices).toEqual([]);
+    expect(chunk.usage?.total_tokens).toBe(15);
   });
 
   it("serializes as an SSE event and sets the terminator", () => {

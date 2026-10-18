@@ -2,19 +2,29 @@
 // Turns a TurnResult into OpenAI responses, SSE chunks and error bodies.
 
 import { randomUUID } from "node:crypto";
+import type { Warning } from "../chat/diagnostics.js";
 
 export interface TurnResult {
   content: string;
   finishReason: string;
   usage: Usage | null;
   toolCalls: Array<{ id: string; name: string; arguments: string; thoughtSignature?: string }>;
+  warnings?: Warning[];
 }
 
-export type Usage = {
+export type CompletionUsage = {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  prompt_tokens_details?: {
+    cached_tokens?: number;
+  };
+  completion_tokens_details?: {
+    reasoning_tokens?: number;
+  };
 };
+
+export type Usage = CompletionUsage;
 
 export type CompletionToolCall = {
   id: string;
@@ -42,6 +52,7 @@ export type ChatCompletion = {
   model: string;
   choices: CompletionChoice[];
   usage?: Usage;
+  warnings?: Warning[];
 };
 
 export type DeltaToolCall = {
@@ -62,7 +73,23 @@ export type ChatCompletionChunk = {
   created: number;
   object: string;
   choices: Array<{ index: number; delta: DeltaContent; finish_reason: string | null }>;
+  usage?: CompletionUsage;
+  warnings?: Warning[];
 };
+
+export interface BuildChunkExtraOpts {
+  warnings?: Warning[];
+  usage?: CompletionUsage;
+  choices?: any[];
+}
+
+export interface BuildChunkOptions extends BuildChunkExtraOpts {
+  id?: string;
+  model?: string;
+  created?: number;
+  delta?: DeltaContent;
+  finishReason?: string | null;
+}
 
 export type OpenAIErrorBody = {
   message: string;
@@ -90,6 +117,7 @@ export function buildCompletionWithId(
   model: string,
   id: string,
   created: number,
+  warnings?: Warning[],
 ): ChatCompletion {
   const completion: ChatCompletion = {
     id,
@@ -120,29 +148,99 @@ export function buildCompletionWithId(
     ],
   };
   if (result.usage !== null) completion.usage = result.usage;
+
+  const allWarnings: Warning[] = [];
+  if (result.warnings && result.warnings.length > 0) {
+    allWarnings.push(...result.warnings);
+  }
+  if (warnings && warnings.length > 0) {
+    for (const w of warnings) {
+      if (!allWarnings.some((existing) => existing.field === w.field && existing.reason === w.reason)) {
+        allWarnings.push(w);
+      }
+    }
+  }
+  if (allWarnings.length > 0) {
+    completion.warnings = allWarnings;
+  }
+
   return completion;
 }
 
-export function buildCompletion(result: TurnResult, model: string): ChatCompletion {
+export function buildCompletion(
+  result: TurnResult,
+  model: string,
+  warnings?: Warning[],
+): ChatCompletion {
   const id = `chatcmpl-${randomUUID()}`;
   const created = Math.floor(Date.now() / 1000);
-  return buildCompletionWithId(result, model, id, created);
+  return buildCompletionWithId(result, model, id, created, warnings);
 }
 
+export function buildChunk(opts: BuildChunkOptions): ChatCompletionChunk;
 export function buildChunk(
   id: string,
   model: string,
   created: number,
   delta: DeltaContent,
   finishReason: string | null,
+  opts?: BuildChunkExtraOpts,
+): ChatCompletionChunk;
+export function buildChunk(
+  idOrOpts: string | BuildChunkOptions,
+  model?: string,
+  created?: number,
+  delta?: DeltaContent,
+  finishReason?: string | null,
+  opts?: BuildChunkExtraOpts,
 ): ChatCompletionChunk {
-  return {
-    id,
-    model,
-    created,
+  if (typeof idOrOpts === "object" && idOrOpts !== null) {
+    const chunkId = idOrOpts.id ?? `chatcmpl-${randomUUID()}`;
+    const chunkModel = idOrOpts.model ?? "";
+    const chunkCreated = idOrOpts.created ?? Math.floor(Date.now() / 1000);
+    const chunkChoices =
+      idOrOpts.choices !== undefined
+        ? idOrOpts.choices
+        : [{ index: 0, delta: idOrOpts.delta ?? {}, finish_reason: idOrOpts.finishReason ?? null }];
+
+    const chunk: ChatCompletionChunk = {
+      id: chunkId,
+      model: chunkModel,
+      created: chunkCreated,
+      object: "chat.completion.chunk",
+      choices: chunkChoices,
+    };
+    if (idOrOpts.usage !== undefined) {
+      chunk.usage = idOrOpts.usage;
+    }
+    if (idOrOpts.warnings && idOrOpts.warnings.length > 0) {
+      chunk.warnings = idOrOpts.warnings;
+    }
+    return chunk;
+  }
+
+  const chunkId = idOrOpts;
+  const chunkModel = model ?? "";
+  const chunkCreated = created ?? Math.floor(Date.now() / 1000);
+  const chunkChoices =
+    opts?.choices !== undefined
+      ? opts.choices
+      : [{ index: 0, delta: delta ?? {}, finish_reason: finishReason ?? null }];
+
+  const chunk: ChatCompletionChunk = {
+    id: chunkId,
+    model: chunkModel,
+    created: chunkCreated,
     object: "chat.completion.chunk",
-    choices: [{ index: 0, delta, finish_reason: finishReason }],
+    choices: chunkChoices,
   };
+  if (opts?.usage !== undefined) {
+    chunk.usage = opts.usage;
+  }
+  if (opts?.warnings && opts.warnings.length > 0) {
+    chunk.warnings = opts.warnings;
+  }
+  return chunk;
 }
 
 export function sseEvent(payload: unknown): string {
