@@ -22,10 +22,15 @@ describe("normalizeEffort", () => {
     for (const value of EFFORTS) expect(normalizeEffort(value)).toBe(value);
   });
 
-  it("falls back to off for an unknown value, without throwing", () => {
-    expect(normalizeEffort("ultra")).toBe("off");
+  it("falls back to off for empty or non-string values", () => {
     expect(normalizeEffort(undefined)).toBe("off");
+    expect(normalizeEffort(null)).toBe("off");
+    expect(normalizeEffort("")).toBe("off");
     expect(normalizeEffort(42)).toBe("off");
+  });
+
+  it("throws an error when reasoning_effort is an unrecognized string", () => {
+    expect(() => normalizeEffort("super-high")).toThrowError(/Invalid reasoning_effort/);
   });
 });
 

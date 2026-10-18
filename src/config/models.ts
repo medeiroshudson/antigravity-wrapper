@@ -1,12 +1,30 @@
 export type ReasoningEffort = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
-const EFFORTS: readonly ReasoningEffort[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+export type EffortLevel = ReasoningEffort;
 
-/** An unknown effort must not break the request: it falls back to "off". */
+export const EFFORTS: readonly ReasoningEffort[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+
+export class InvalidEffortError extends Error {
+  constructor(raw: string) {
+    super(`Invalid reasoning_effort '${raw}'. Supported values: ${EFFORTS.join(", ")}`);
+    this.name = "InvalidEffortError";
+  }
+}
+
+/**
+ * Normalizes reasoning effort input.
+ * Undefined, null, or empty string falls back to "off".
+ * An unrecognized non-empty string throws InvalidEffortError (spec D6).
+ */
 export function normalizeEffort(raw: unknown): ReasoningEffort {
-  return typeof raw === "string" && (EFFORTS as readonly string[]).includes(raw)
-    ? (raw as ReasoningEffort)
-    : "off";
+  if (raw === undefined || raw === null || raw === "") return "off";
+  if (typeof raw === "string") {
+    if ((EFFORTS as readonly string[]).includes(raw)) {
+      return raw as ReasoningEffort;
+    }
+    throw new InvalidEffortError(raw);
+  }
+  return "off";
 }
 
 /** One entry as the catalog reports it. Numbers are null when the backend omits them. */

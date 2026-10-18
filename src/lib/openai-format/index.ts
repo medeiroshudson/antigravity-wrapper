@@ -169,9 +169,11 @@ export function toOpenAIErrorBody(
   const error: OpenAIErrorBody =
     finalStatus === 400 || finalStatus === 422
       ? { message, type: "invalid_request_error", param: null }
-      : finalStatus === 429
-        ? { message, type: "rate_limit_error", code: "rate_limit_exceeded", param: null }
-        : { message, type: "server_error", code: "antigravity_error", param: null };
+      : finalStatus === 404
+        ? { message, type: "invalid_request_error", code: "model_not_found", param: null }
+        : finalStatus === 429
+          ? { message, type: "rate_limit_error", code: "rate_limit_exceeded", param: null }
+          : { message, type: "server_error", code: "antigravity_error", param: null };
 
   return { status: finalStatus, body: { error } };
 }

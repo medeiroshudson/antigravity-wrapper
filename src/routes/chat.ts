@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
-import { getPublicModels, normalizeEffort, resolveRuntimeModel } from "../config/models.js";
+import {
+  InvalidEffortError,
+  getPublicModels,
+  normalizeEffort,
+  resolveRuntimeModel,
+  type ReasoningEffort,
+} from "../config/models.js";
 import { getStreamFlushPatienceMs } from "../config/index.js";
 import { t } from "../i18n/index.js";
 import type { AccountStore } from "../lib/accounts/store.js";
@@ -148,7 +154,18 @@ export async function chatRoutes(
       return;
     }
 
-    const effort = normalizeEffort(body.reasoning_effort);
+    let effort: ReasoningEffort;
+    try {
+      effort = normalizeEffort(body.reasoning_effort);
+    } catch (error) {
+      if (error instanceof InvalidEffortError) {
+        log.warn({ model: body.model, err: error.message }, "invalid reasoning_effort");
+        const mapped = toOpenAIErrorBody(error, 400);
+        reply.status(mapped.status).send(mapped.body);
+        return;
+      }
+      throw error;
+    }
     const runtimeModel = resolveRuntimeModel(body.model, effort);
 
     let contents;

@@ -112,6 +112,29 @@ describe("POST /v1/chat/completions", () => {
       payload: { model: "does-not-exist", messages: [{ role: "user", content: "oi" }] },
     });
     expect(response.statusCode).toBe(404);
+    expect(response.json().error).toMatchObject({
+      type: "invalid_request_error",
+      code: "model_not_found",
+    });
+  });
+
+  it("returns 400 invalid_request_error when reasoning_effort is an unrecognized string", async () => {
+    app = buildServer("test-key", { store, env: ENV, fetchImpl: fetchOk(), logger: false });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: {
+        model: "gemini-3.8-flash",
+        reasoning_effort: "super-high",
+        messages: [{ role: "user", content: "oi" }],
+      },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error).toMatchObject({
+      type: "invalid_request_error",
+    });
+    expect(response.json().error.message).toMatch(/Invalid reasoning_effort/);
   });
 
   it("returns a non-retryable 400 when the pool is empty", async () => {

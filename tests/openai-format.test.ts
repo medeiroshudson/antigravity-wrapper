@@ -104,4 +104,13 @@ describe("toOpenAIErrorBody", () => {
     expect(mapped.status).toBe(400);
     expect(mapped.body.error.type).toBe("invalid_request_error");
   });
+
+  it("brands 404 errors as invalid_request_error with model_not_found code", () => {
+    const result = toOpenAIErrorBody(new Error("Model 'gpt-5' not found"), 404);
+    expect(result.status).toBe(404);
+    expect(result.body.error).toMatchObject({
+      type: "invalid_request_error",
+      code: "model_not_found",
+    });
+  });
 });
