@@ -175,6 +175,9 @@ export async function imagesRoutes(
       if (error instanceof UpstreamError) {
         const status = error.status >= 400 && error.status <= 599 ? error.status : 502;
         const mapped = toOpenAIErrorBody(error, status);
+        if (mapped.status === 400 && error.message.toLowerCase().includes("safety")) {
+          mapped.body.error.code = "content_policy_violation";
+        }
         log.warn(
           {
             model,

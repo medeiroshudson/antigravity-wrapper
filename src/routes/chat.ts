@@ -329,10 +329,7 @@ export async function chatRoutes(
     );
 
     if (enableWebSearch && !runtimeModel.startsWith("gemini-")) {
-      warningCollector.add(
-        "web_search",
-        "Field 'web_search' is only supported on Gemini models and was ignored",
-      );
+      warningCollector.add("web_search", t("warn.searchUnsupportedModel"));
     }
 
     // The injected store (buildServer) must win: the runtime.ts singletons

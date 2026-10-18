@@ -98,6 +98,8 @@ const enUS = {
   "warn.ignoredFieldN":
     "Field 'n' is not supported upstream and was ignored (only one choice is returned)",
   "warn.invalidStop": "Field 'stop' must be a string or array of strings and was ignored",
+  "warn.searchUnsupportedModel":
+    "Field 'web_search' is only supported on Gemini models and was ignored",
 } as const;
 
 export type MessageKey = keyof typeof enUS;

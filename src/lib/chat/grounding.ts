@@ -18,7 +18,7 @@ export interface StructuredGrounding {
 }
 
 function resolveTitle(uri: string, title?: string): string {
-  const trimmed = title?.trim();
+  const trimmed = title?.trim().replace(/[\[\]]/g, "");
   if (trimmed) {
     return trimmed;
   }
