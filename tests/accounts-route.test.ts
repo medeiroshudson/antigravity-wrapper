@@ -75,8 +75,8 @@ describe("POST /admin/accounts/complete", () => {
     const body = list.json() as { accounts: Array<{ projectId: string; email: string | null }> };
     expect(body.accounts).toHaveLength(1);
     expect(body.accounts[0]?.projectId).toBe("aicode-consumers");
-    // The email is captured at login and returned masked, never in clear text.
-    expect(body.accounts[0]?.email).toBe("h***n@gmail.com");
+    // The email is captured at login and returned in clear text to identify the account.
+    expect(body.accounts[0]?.email).toBe("hudson@gmail.com");
   });
 
   it("seeds the model registry so /v1/models is not empty right after login", async () => {
@@ -164,10 +164,10 @@ describe("management", () => {
     app = buildServer("test-key", { store, env: ENV, logger: false });
   });
 
-  it("lists with masked email and no token", async () => {
+  it("lists with clear-text email and no token", async () => {
     const response = await app.inject({ method: "GET", url: "/admin/accounts", headers: auth });
     const body = response.json() as { accounts: Array<Record<string, unknown>> };
-    expect(body.accounts[0]?.email).toBe("h***n@gmail.com");
+    expect(body.accounts[0]?.email).toBe("hudson@gmail.com");
     const serialized = JSON.stringify(body);
     expect(serialized).not.toContain("refreshToken");
     expect(serialized).not.toContain("accessToken");
@@ -455,6 +455,7 @@ describe("management", () => {
     const body = response.json() as Record<string, any>;
     expect(body.activeAccounts).toBe(1);
     expect(Array.isArray(body.accounts)).toBe(true);
+    expect(body.accounts[0]?.email).toBe("hudson@gmail.com");
   });
 
   it("includes lean pool summary on /admin/accounts/quota alongside accounts list", async () => {
@@ -497,6 +498,7 @@ describe("management", () => {
     expect(body.claudeGpt["5h"].remainingPercent).toBe(60);
     expect(body.claudeGpt.weekly.remainingPercent).toBe(40);
     expect(Array.isArray(body.accounts)).toBe(true);
+    expect(body.accounts[0]?.email).toBe("hudson@gmail.com");
   });
 
   it("requires bearer auth on /accounts/quota", async () => {

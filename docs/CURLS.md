@@ -86,9 +86,9 @@ Paste the copied URL in place of `<CALLBACK_URL>`:
 curl -sS -X POST "$BASE/admin/accounts/complete" -H "Authorization: Bearer $KEY" -H 'content-type: application/json' -d '{"callbackUrl":"<CALLBACK_URL>"}'
 ```
 
-Response: `{"account":{...,"email":"h***n@gmail.com","projectId":"..."},"paidTier":"Google AI Pro"}`
+Response: `{"account":{...,"email":"hudson@gmail.com","projectId":"..."},"paidTier":"Google AI Pro"}`
 
-The email comes back **masked** and `paidTier` shows the subscription the account carries —
+The email comes back in clear text and `paidTier` shows the subscription the account carries —
 if it comes back `null`, the account authenticated but has no paid tier associated.
 
 ---

@@ -332,7 +332,7 @@ not fail the login), and stores everything:
 {
   "account": {
     "id": "account-3f2a91bc77de0d14",
-    "email": "h***n@gmail.com",
+    "email": "hudson@gmail.com",
     "projectId": "aicode-consumers",
     "status": "active",
     "paidTier": { "id": "g1-pro-tier", "name": "Google AI Pro" },
@@ -361,7 +361,7 @@ deliberately, raise its `priority` — that outranks quota in the selection orde
 The tier is read at login and re-read on every quota refresh, so it stays current without a
 new login.
 
-The email is always returned **masked**; when it could not be read, `id` is the only
+The email is returned in clear text; when it could not be read, `id` is the only
 label.
 
 Adding more accounts is repeating these three steps, with the same Google account or a
@@ -397,7 +397,7 @@ curl -s http://127.0.0.1:3000/admin/accounts -H "Authorization: Bearer $API_KEY"
   "accounts": [
     {
       "id": "account-3f2a91bc77de0d14",
-      "email": "h***n@gmail.com",
+      "email": "hudson@gmail.com",
       "projectId": "aicode-consumers",
       "status": "active",
       "paidTier": { "id": "g1-pro-tier", "name": "Google AI Pro" },
@@ -483,7 +483,7 @@ curl -s http://127.0.0.1:3000/admin/accounts/quota -H "Authorization: Bearer $AP
   "accounts": [
     {
       "id": "account-492b954c1a93c92f",
-      "email": "h***c@gmail.com",
+      "email": "hmedeiros.tec@gmail.com",
       "projectId": "aicode-consumers",
       "status": "active",
       "paidTier": { "id": "g1-pro-tier", "name": "Google AI Pro" },
@@ -1028,7 +1028,7 @@ private network, an allowlist of source addresses, or not at all.
 
 Tokens are not serialized by any route — the admin surface has a single public-view mapper
 with no bypass path, and error messages pass through a redactor that strips Google token
-shapes. Accounts are identified to callers by id and masked email only.
+shapes. Accounts are identified to callers by id and email only.
 
 ### The request fingerprint
 

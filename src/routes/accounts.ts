@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { FastifyInstance, FastifyReply } from "fastify";
-import { getClientCredentials, maskEmail } from "../config/index.js";
+import { getClientCredentials } from "../config/index.js";
 import { applyCatalog } from "../config/models.js";
 import { t } from "../i18n/index.js";
 import { AccountService } from "../lib/accounts/service.js";
@@ -37,7 +37,7 @@ function publicView(
   if (!account) return null;
   return {
     id: account.id,
-    email: maskEmail(account.email ?? undefined) ?? null,
+    email: account.email ?? null,
     projectId: account.projectId,
     status: account.status,
     // Both halves, or null when the tier was never read. An object absent entirely
