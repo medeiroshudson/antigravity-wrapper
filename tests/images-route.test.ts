@@ -1,9 +1,32 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildServer } from "../src/server.js";
+import { AccountStore } from "../src/lib/accounts/store.js";
 
 describe("POST /v1/images/generations", () => {
+  let store: AccountStore;
+
+  function buildTestServer(fetchImpl?: typeof fetch) {
+    return buildServer("test-key", { store, fetchImpl: fetchImpl as any, logger: false });
+  }
+
+  beforeEach(() => {
+    store = new AccountStore(":memory:");
+    store.upsertAccount({
+      id: "acc-1",
+      email: "test@example.com",
+      refreshToken: "r",
+      accessToken: "tok",
+      accessExpiresAt: Date.now() + 3_600_000,
+      projectId: "aicode-consumers",
+    });
+  });
+
+  afterEach(() => {
+    store.close();
+  });
+
   it("rejects request without prompt with 400", async () => {
-    const server = buildServer("test-key");
+    const server = buildTestServer();
     const res = await server.inject({
       method: "POST",
       url: "/v1/images/generations",
@@ -15,7 +38,7 @@ describe("POST /v1/images/generations", () => {
   });
 
   it("rejects request with empty prompt with 400", async () => {
-    const server = buildServer("test-key");
+    const server = buildTestServer();
     const res = await server.inject({
       method: "POST",
       url: "/v1/images/generations",
@@ -27,7 +50,7 @@ describe("POST /v1/images/generations", () => {
   });
 
   it("rejects request with prompt exceeding 4000 characters with 400", async () => {
-    const server = buildServer("test-key");
+    const server = buildTestServer();
     const res = await server.inject({
       method: "POST",
       url: "/v1/images/generations",
@@ -39,7 +62,7 @@ describe("POST /v1/images/generations", () => {
   });
 
   it("rejects unknown model with 400", async () => {
-    const server = buildServer("test-key");
+    const server = buildTestServer();
     const res = await server.inject({
       method: "POST",
       url: "/v1/images/generations",
@@ -51,7 +74,7 @@ describe("POST /v1/images/generations", () => {
   });
 
   it("rejects invalid n with 400", async () => {
-    const server = buildServer("test-key");
+    const server = buildTestServer();
     const resTooLarge = await server.inject({
       method: "POST",
       url: "/v1/images/generations",
@@ -82,7 +105,7 @@ describe("POST /v1/images/generations", () => {
       }),
     });
 
-    const server = buildServer("test-key", { fetchImpl: mockFetch as any });
+    const server = buildTestServer(mockFetch as any);
     const res = await server.inject({
       method: "POST",
       url: "/v1/images/generations",
@@ -110,7 +133,7 @@ describe("POST /v1/images/generations", () => {
       }),
     });
 
-    const server = buildServer("test-key", { fetchImpl: mockFetch as any });
+    const server = buildTestServer(mockFetch as any);
     const res = await server.inject({
       method: "POST",
       url: "/v1/images/generations",
@@ -140,7 +163,7 @@ describe("POST /v1/images/generations", () => {
       };
     };
 
-    const server = buildServer("test-key", { fetchImpl: mockFetch as any });
+    const server = buildTestServer(mockFetch as any);
     const res = await server.inject({
       method: "POST",
       url: "/v1/images/generations",
@@ -169,7 +192,7 @@ describe("POST /v1/images/generations", () => {
       };
     };
 
-    const server = buildServer("test-key", { fetchImpl: mockFetch as any });
+    const server = buildTestServer(mockFetch as any);
     const res = await server.inject({
       method: "POST",
       url: "/v1/images/generations",
@@ -182,6 +205,7 @@ describe("POST /v1/images/generations", () => {
     expect(body.data).toHaveLength(2);
     expect(body.data[0].b64_json).toBe("image-1");
     expect(body.data[1].b64_json).toBe("image-2");
+    expect(callCount).toBe(2);
   });
 
   it("maps upstream safety violation to 400", async () => {
@@ -191,7 +215,7 @@ describe("POST /v1/images/generations", () => {
       text: async () => "SAFETY: Prohibited content detected",
     });
 
-    const server = buildServer("test-key", { fetchImpl: mockFetch as any });
+    const server = buildTestServer(mockFetch as any);
     const res = await server.inject({
       method: "POST",
       url: "/v1/images/generations",
@@ -201,10 +225,11 @@ describe("POST /v1/images/generations", () => {
 
     expect(res.statusCode).toBe(400);
     expect(res.json().error.type).toBe("invalid_request_error");
+    expect(res.json().error.code).toBe("content_policy_violation");
   });
 
   it("rejects non-string prompt with 400", async () => {
-    const server = buildServer("test-key");
+    const server = buildTestServer();
     const res = await server.inject({
       method: "POST",
       url: "/v1/images/generations",
@@ -216,7 +241,7 @@ describe("POST /v1/images/generations", () => {
   });
 
   it("rejects non-string size with 400", async () => {
-    const server = buildServer("test-key");
+    const server = buildTestServer();
     const res = await server.inject({
       method: "POST",
       url: "/v1/images/generations",
@@ -228,7 +253,7 @@ describe("POST /v1/images/generations", () => {
   });
 
   it("rejects non-integer n with 400", async () => {
-    const server = buildServer("test-key");
+    const server = buildTestServer();
     const res = await server.inject({
       method: "POST",
       url: "/v1/images/generations",
@@ -240,7 +265,7 @@ describe("POST /v1/images/generations", () => {
   });
 
   it("rejects unsupported response_format with 400", async () => {
-    const server = buildServer("test-key");
+    const server = buildTestServer();
     const res = await server.inject({
       method: "POST",
       url: "/v1/images/generations",
@@ -268,7 +293,7 @@ describe("POST /v1/images/generations", () => {
       };
     };
 
-    const server = buildServer("test-key", { fetchImpl: mockFetch as any });
+    const server = buildTestServer(mockFetch as any);
     const res = await server.inject({
       method: "POST",
       url: "/v1/images/generations",
@@ -287,7 +312,7 @@ describe("POST /v1/images/generations", () => {
       text: async () => "Internal Server Error",
     });
 
-    const server = buildServer("test-key", { fetchImpl: mockFetch as any });
+    const server = buildTestServer(mockFetch as any);
     const res = await server.inject({
       method: "POST",
       url: "/v1/images/generations",
