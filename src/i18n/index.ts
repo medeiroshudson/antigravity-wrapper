@@ -79,6 +79,16 @@ const enUS = {
   "oauth.loadCodeAssistFailed": "loadCodeAssist responded {status}",
   "oauth.loadCodeAssistNoProject": "loadCodeAssist returned no projectId",
   "oauth.projectIdDiscoveryFailed": "Could not discover the projectId: {detail}",
+
+  // --- diagnostic warnings -------------------------------------------------
+  "warn.ignoredField": "Field '{field}' is not supported upstream and was ignored",
+  "warn.unrecognizedField": "Field '{field}' is not recognized and was ignored",
+  "warn.droppedMedia": "Media block '{type}' is not supported and was omitted",
+  "warn.invalidToolArgs": "Tool call arguments were not valid JSON and were sent empty",
+  "warn.droppedSchemaKeywords": "Unsupported schema keywords were dropped: {keywords}",
+  "warn.unverifiedStop":
+    "Stop requested; upstream honoring is unverified -- the delimiter may appear in content",
+  "warn.disabledGenConfig": "generationConfig mapping is disabled by kill-switch",
 } as const;
 
 export type MessageKey = keyof typeof enUS;
