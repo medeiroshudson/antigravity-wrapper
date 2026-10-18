@@ -44,9 +44,10 @@ describe("POST /v1/images/generations", () => {
       method: "POST",
       url: "/v1/images/generations",
       headers: { authorization: "Bearer test-key" },
-      payload: { prompt: "A cat", model: "non-existent-image-model" },
+      payload: { prompt: "A cat", model: "dall-e-3" },
     });
     expect(res.statusCode).toBe(400);
+    expect(res.json().error.message).toMatch(/not supported/i);
   });
 
   it("rejects invalid n with 400", async () => {
@@ -86,7 +87,7 @@ describe("POST /v1/images/generations", () => {
       method: "POST",
       url: "/v1/images/generations",
       headers: { authorization: "Bearer test-key" },
-      payload: { prompt: "A cat", model: "dall-e-3", response_format: "b64_json" },
+      payload: { prompt: "A cat", model: "gemini-3.1-flash-image", response_format: "b64_json" },
     });
 
     expect(res.statusCode).toBe(200);
@@ -151,7 +152,7 @@ describe("POST /v1/images/generations", () => {
     expect(capturedBody.model).toBe("gemini-3.1-flash-image");
   });
 
-  it("supports dall-e-2 model and generates multiple images when n > 1", async () => {
+  it("generates multiple images when n > 1", async () => {
     let callCount = 0;
     const mockFetch = async () => {
       callCount++;
@@ -173,7 +174,7 @@ describe("POST /v1/images/generations", () => {
       method: "POST",
       url: "/v1/images/generations",
       headers: { authorization: "Bearer test-key" },
-      payload: { prompt: "Two puppies", model: "dall-e-2", n: 2 },
+      payload: { prompt: "Two puppies", model: "gemini-3.1-flash-image", n: 2 },
     });
 
     expect(res.statusCode).toBe(200);

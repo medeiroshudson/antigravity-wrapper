@@ -89,7 +89,7 @@ describe("GET /v1/models", () => {
     expect(model).toEqual({ id: "gemini-9.9-flash", object: "model", owned_by: "antigravity", display_name: "Gemini 9.9 Flash" });
   });
 
-  it("exposes gemini-3.1-flash-image and dall-e-3 image models", async () => {
+  it("exposes gemini-3.1-flash-image image model", async () => {
     applyCatalog([
       {
         id: "gemini-3.1-flash-image",
@@ -109,7 +109,7 @@ describe("GET /v1/models", () => {
     const body = response.json() as { data: Array<{ id: string }> };
     const ids = body.data.map((m) => m.id);
     expect(ids).toContain("gemini-3.1-flash-image");
-    expect(ids).toContain("dall-e-3");
+    expect(ids).not.toContain("dall-e-3");
   });
 
   it("returns an empty list when nothing has been discovered", async () => {

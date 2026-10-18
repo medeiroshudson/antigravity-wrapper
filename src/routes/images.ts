@@ -8,7 +8,7 @@ import { AllAccountsFailedError } from "../lib/chat/turn.js";
 import { toOpenAIErrorBody } from "../lib/openai-format/index.js";
 import { wireClientDisconnect } from "./chat.js";
 
-export const VALID_IMAGE_MODELS = new Set(["gemini-3.1-flash-image", "dall-e-3", "dall-e-2"]);
+export const VALID_IMAGE_MODELS = new Set(["gemini-3.1-flash-image"]);
 export const DEFAULT_IMAGE_MODEL = "gemini-3.1-flash-image";
 
 export interface ImagesRouteDeps {
