@@ -27,6 +27,7 @@ import {
 } from "../lib/chat/diagnostics.js";
 import { buildResponseFormatConfig } from "../lib/chat/schema-sanitizer.js";
 import { getAccountService } from "../lib/runtime.js";
+import { extractStructuredGrounding } from "../lib/chat/grounding.js";
 import {
   buildChunk,
   buildCompletion,
@@ -55,6 +56,8 @@ interface ChatBody {
   stream_options?: StreamOptions;
   tools?: unknown[];
   tool_choice?: unknown;
+  web_search?: boolean;
+  web_search_options?: Record<string, unknown>;
   [key: string]: unknown;
 }
 
@@ -77,6 +80,8 @@ const bodySchema = {
       stream_options: {},
       tools: { type: "array" },
       tool_choice: {},
+      web_search: {},
+      web_search_options: {},
     },
   },
 } as const;
@@ -96,6 +101,8 @@ const KNOWN_BODY_FIELDS = new Set([
   "stream_options",
   "tools",
   "tool_choice",
+  "web_search",
+  "web_search_options",
 ]);
 
 /**
@@ -314,6 +321,20 @@ export async function chatRoutes(
     );
     warningCollector.addAll(responseFormatConfig.warnings);
 
+    const enableWebSearch = Boolean(
+      body.web_search === true ||
+      body.web_search_options !== undefined ||
+      deps.env?.ANTIGRAVITY_SEARCH_AUTO === "true" ||
+      process.env.ANTIGRAVITY_SEARCH_AUTO === "true",
+    );
+
+    if (enableWebSearch && !runtimeModel.startsWith("gemini-")) {
+      warningCollector.add(
+        "web_search",
+        "Field 'web_search' is only supported on Gemini models and was ignored",
+      );
+    }
+
     // The injected store (buildServer) must win: the runtime.ts singletons
     // exist for the production entrypoint, not for the route under test.
     const accounts = deps.store
@@ -333,6 +354,7 @@ export async function chatRoutes(
       stopSequences,
       responseMimeType: responseFormatConfig.responseMimeType,
       responseSchema: responseFormatConfig.responseSchema,
+      enableWebSearch: enableWebSearch && runtimeModel.startsWith("gemini-"),
     };
 
     // The signal comes from the `reply`, never from `request.signal`: the latter
@@ -487,7 +509,11 @@ export async function chatRoutes(
         }
       }
 
-      writeChunk({}, result.finishReason, allWarnings.length > 0 ? { warnings: allWarnings } : undefined);
+      const structuredGrounding = result.groundingMetadata
+        ? extractStructuredGrounding(result.groundingMetadata)
+        : undefined;
+      const finalDelta = structuredGrounding ? { grounding_metadata: structuredGrounding } : {};
+      writeChunk(finalDelta, result.finishReason, allWarnings.length > 0 ? { warnings: allWarnings } : undefined);
 
       if (body.stream_options?.include_usage === true) {
         const usageChunk = buildChunk({
