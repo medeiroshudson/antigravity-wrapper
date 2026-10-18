@@ -123,11 +123,51 @@ describe("buildFunctionDeclarations", () => {
         parameters: { type: "object", properties: { next: { $ref: "#" } } },
       },
     ];
-    expect(buildFunctionDeclarations(tools, "claude-sonnet-4-6")).toBeUndefined();
+    const out = buildFunctionDeclarations(tools, "claude-sonnet-4-6");
+    expect(out.declarations).toBeUndefined();
+    expect(out.diagnostics).toContainEqual(
+      expect.objectContaining({ field: "tools[0].function.name:ciclica" })
+    );
   });
 
-  it("returns undefined without tools", () => {
-    expect(buildFunctionDeclarations([], "gemini-3.8-flash-low")).toBeUndefined();
+  it("returns undefined declarations without tools", () => {
+    const out = buildFunctionDeclarations([], "gemini-3.8-flash-low");
+    expect(out.declarations).toBeUndefined();
+    expect(out.diagnostics).toEqual([]);
+  });
+
+  it("records diagnostic warning when unresolvable $ref causes tool omission", () => {
+    const result = buildFunctionDeclarations([
+      { type: "function", function: { name: "broken", parameters: { $ref: "#/missing" } } },
+    ], "gemini-2.5-flash");
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({ field: "tools[0].function.name:broken" })
+    );
+  });
+
+  it("records diagnostic warning when legacy keywords are dropped on Claude/GPT path", () => {
+    const result = buildFunctionDeclarations([
+      {
+        type: "function",
+        function: {
+          name: "test_tool",
+          parameters: {
+            type: "object",
+            properties: {
+              foo: { type: "string", format: "uri" },
+              bar: { anyOf: [{ type: "string" }] },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+    ], "claude-sonnet-4-6");
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({
+        field: "tools[0].parameters",
+        reason: expect.stringMatching(/unsupported schema keywords were dropped/i),
+      })
+    );
   });
 });
 

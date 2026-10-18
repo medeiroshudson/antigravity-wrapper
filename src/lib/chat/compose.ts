@@ -1,5 +1,6 @@
 import { t } from "../../i18n/index.js";
 import type { GeminiContent, GeminiPart } from "../antigravity/envelope.js";
+import type { Warning } from "./diagnostics.js";
 import { recallSignature } from "./signatures.js";
 
 export interface ChatToolCall {
@@ -34,15 +35,51 @@ function textOf(content: unknown): string {
   return String(content);
 }
 
-function parseArgs(raw: string | undefined): Record<string, unknown> {
-  if (!raw) return {};
+function collectDroppedContent(content: unknown, msgIdx: number, diagnostics: Warning[]): void {
+  if (!Array.isArray(content)) return;
+  for (let blockIdx = 0; blockIdx < content.length; blockIdx++) {
+    const block = content[blockIdx];
+    if (typeof block === "string") continue;
+    if (typeof block === "object" && block !== null) {
+      const b = block as Record<string, unknown>;
+      if (b.type === "text" && typeof b.text === "string") {
+        continue;
+      }
+      if (typeof b.text === "string" && !b.type) {
+        continue;
+      }
+      let mediaType = "unknown";
+      if (typeof b.type === "string" && b.type !== "text") {
+        mediaType = b.type;
+      } else if ("image_url" in b) {
+        mediaType = "image_url";
+      } else if ("input_audio" in b) {
+        mediaType = "input_audio";
+      } else if ("file" in b) {
+        mediaType = "file";
+      }
+      const field =
+        mediaType !== "unknown"
+          ? `messages[${msgIdx}].content[${blockIdx}].${mediaType}`
+          : `messages[${msgIdx}].content[${blockIdx}]`;
+      diagnostics.push({
+        field,
+        reason: t("warn.droppedMedia", { type: mediaType }),
+      });
+    }
+  }
+}
+
+function parseArgs(raw: string | undefined): { args: Record<string, unknown>; isInvalid?: boolean } {
+  if (!raw) return { args: {} };
   try {
     const parsed: unknown = JSON.parse(raw);
-    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : {};
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      return { args: parsed as Record<string, unknown> };
+    }
+    return { args: {}, isInvalid: true };
   } catch {
-    return {};
+    return { args: {}, isInvalid: true };
   }
 }
 
@@ -72,6 +109,7 @@ export function toContents(
 ): {
   contents: GeminiContent[];
   systemInstruction: string;
+  diagnostics: Warning[];
 } {
   if (!Array.isArray(messages) || messages.length === 0) {
     throw new Error(t("chat.messagesEmpty"));
@@ -80,6 +118,7 @@ export function toContents(
   const strict = opts.strictThoughtSignatures === true;
   const contents: GeminiContent[] = [];
   const systemParts: string[] = [];
+  const diagnostics: Warning[] = [];
 
   // The upstream requires functionResponse.name to name the functionCall it answers.
   // `name` on an OpenAI tool message is optional and clients pair by tool_call_id, so
@@ -99,7 +138,9 @@ export function toContents(
   // textualized too, or the orphan functionResponse breaks the same rule.
   const textualized = new Set<string>();
 
-  for (const message of messages) {
+  for (let msgIdx = 0; msgIdx < messages.length; msgIdx++) {
+    const message = messages[msgIdx]!;
+    collectDroppedContent(message.content, msgIdx, diagnostics);
     const role = (message.role ?? "").toLowerCase();
 
     if (role === "system" || role === "developer") {
@@ -112,9 +153,18 @@ export function toContents(
       const parts: GeminiPart[] = [];
       const text = textOf(message.content);
       if (text) parts.push({ text });
-      for (const call of message.tool_calls ?? []) {
+      const toolCalls = message.tool_calls ?? [];
+      for (let callIdx = 0; callIdx < toolCalls.length; callIdx++) {
+        const call = toolCalls[callIdx]!;
         const name = call.function?.name;
         if (typeof name !== "string" || name.length === 0) continue;
+        const { args, isInvalid } = parseArgs(call.function?.arguments);
+        if (isInvalid) {
+          diagnostics.push({
+            field: `messages[${msgIdx}].tool_calls[${callIdx}].function.arguments`,
+            reason: t("warn.invalidToolArgs"),
+          });
+        }
         // OpenAI clients drop the non-standard thoughtSignature when echoing the
         // assistant turn back; the wrapper remembers it and reattaches it, because the
         // upstream rejects an unsigned history (see signatures.ts). The bank is
@@ -128,7 +178,7 @@ export function toContents(
         const part: GeminiPart = {
           functionCall: {
             name,
-            args: parseArgs(call.function?.arguments),
+            args,
             ...(typeof call.id === "string" && call.id ? { id: call.id } : {}),
           },
         };
@@ -165,5 +215,5 @@ export function toContents(
     if (text) pushTurn(contents, "user", [{ text }]);
   }
 
-  return { contents, systemInstruction: systemParts.join("\n\n") };
+  return { contents, systemInstruction: systemParts.join("\n\n"), diagnostics };
 }

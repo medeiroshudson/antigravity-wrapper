@@ -187,7 +187,7 @@ export async function chatRoutes(
     }
 
     const tools = extractToolDefs(body);
-    const declarations = buildFunctionDeclarations(tools, runtimeModel);
+    const { declarations } = buildFunctionDeclarations(tools, runtimeModel);
     // `toolInstruction` already implements the spec table: `auto`/absent -> null;
     // `none`/`required`/named -> instruction without a fence. There is nothing
     // left to suppress — the old guard nullified all three cases and disabled

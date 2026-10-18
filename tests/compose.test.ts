@@ -171,4 +171,33 @@ describe("toContents", () => {
   it("throws on an empty list", () => {
     expect(() => toContents([])).toThrow(/non-empty/i);
   });
+
+  it("records diagnostic warning when image or audio content blocks are dropped", () => {
+    const result = toContents([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "What is this?" },
+          { type: "image_url", image_url: { url: "http://example.com/a.png" } } as any,
+        ],
+      },
+    ]);
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({ field: "messages[0].content[1].image_url" })
+    );
+  });
+
+  it("records diagnostic warning when tool call arguments are invalid JSON", () => {
+    const result = toContents([
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [{ id: "call_1", type: "function", function: { name: "test", arguments: "{malformed" } }],
+      },
+    ]);
+    expect(result.diagnostics).toContainEqual(
+      expect.objectContaining({ field: "messages[0].tool_calls[0].function.arguments" })
+    );
+  });
 });
+

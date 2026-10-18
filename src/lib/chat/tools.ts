@@ -1,10 +1,18 @@
 import { randomUUID } from "node:crypto";
+import { t } from "../../i18n/index.js";
 import type { ChatToolCall } from "./compose.js";
+import type { Warning } from "./diagnostics.js";
 
 export interface ToolDef {
   name: string;
   description: string;
   parameters: unknown;
+}
+
+export interface BuildFunctionDeclarationsResult {
+  declarations?: { functionDeclarations: unknown[] };
+  functionDeclarations?: unknown[];
+  diagnostics: Warning[];
 }
 
 /** Allowlist for the legacy `parameters` field (spec §8). */
@@ -70,24 +78,30 @@ function resolveLocalPointer(ref: string, root: unknown): unknown {
 const UNRESOLVED = Symbol("unresolved");
 
 /** Reduces the schema to the legacy allowlist. Property names are NOT filtered. */
-function toLegacySchema(schema: unknown): unknown {
-  if (Array.isArray(schema)) return schema.map(toLegacySchema);
+function toLegacySchema(schema: unknown, droppedKeywords?: Set<string>): unknown {
+  if (Array.isArray(schema)) return schema.map((item) => toLegacySchema(item, droppedKeywords));
   const record = asRecord(schema);
   if (!record) return schema;
 
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(record)) {
-    if (!LEGACY_ALLOW.has(key)) continue;
+    if (!LEGACY_ALLOW.has(key)) {
+      droppedKeywords?.add(key);
+      continue;
+    }
     if (key === "properties") {
       const props = asRecord(value);
       if (!props) continue;
       out.properties = Object.fromEntries(
-        Object.entries(props).map(([name, sub]) => [name, toLegacySchema(sub)]),
+        Object.entries(props).map(([name, sub]) => [name, toLegacySchema(sub, droppedKeywords)]),
       );
       continue;
     }
-    if (key === "enum" && Array.isArray(value) && !value.every((v) => typeof v === "string")) continue;
-    out[key] = toLegacySchema(value);
+    if (key === "enum" && Array.isArray(value) && !value.every((v) => typeof v === "string")) {
+      droppedKeywords?.add(key);
+      continue;
+    }
+    out[key] = toLegacySchema(value, droppedKeywords);
   }
   return out;
 }
@@ -152,26 +166,72 @@ export function usesLegacyEncoding(runtimeModel: string): boolean {
  * instead of accepting it with 200 and silently not calling the tool.
  */
 export function buildFunctionDeclarations(
-  tools: ToolDef[],
+  tools: Array<ToolDef | Record<string, unknown>>,
   runtimeModel: string,
-): { functionDeclarations: unknown[] } | undefined {
-  if (tools.length === 0) return undefined;
+): BuildFunctionDeclarationsResult {
+  const diagnostics: Warning[] = [];
+  if (!Array.isArray(tools) || tools.length === 0) {
+    return { declarations: undefined, functionDeclarations: undefined, diagnostics };
+  }
+
   const legacy = usesLegacyEncoding(runtimeModel);
   const declarations: unknown[] = [];
 
-  for (const tool of tools) {
-    const dereferenced = dereference(tool.parameters, tool.parameters);
-    if (dereferenced === UNRESOLVED) continue; // unresolvable schema: omit the tool
+  for (let i = 0; i < tools.length; i++) {
+    const rawTool = tools[i];
+    const rec = asRecord(rawTool) ?? {};
+    const fn = asRecord(rec.function);
+    const name = typeof fn?.name === "string" ? fn.name : (typeof rec.name === "string" ? rec.name : "");
+    const description =
+      typeof fn?.description === "string"
+        ? fn.description
+        : (typeof rec.description === "string" ? rec.description : "");
+    const rawParams = fn ? fn.parameters : rec.parameters;
+    const parameters = rawParams ?? { type: "object", properties: {} };
+
+    const dereferenced = dereference(parameters, parameters);
+    if (dereferenced === UNRESOLVED) {
+      diagnostics.push({
+        field: `tools[${i}].function.name:${name}`,
+        reason: `Tool '${name}' was omitted: unresolvable $ref`,
+      });
+      continue;
+    }
+
     const schema = asRecord(dereferenced) ?? {};
     const normalized = { type: "object", properties: {}, ...schema };
-    declarations.push({
-      name: tool.name,
-      description: tool.description,
-      ...(legacy ? { parameters: toLegacySchema(normalized) } : { parametersJsonSchema: normalized }),
-    });
+
+    if (legacy) {
+      const droppedKeywords = new Set<string>();
+      const legacySchema = toLegacySchema(normalized, droppedKeywords);
+      if (droppedKeywords.size > 0) {
+        diagnostics.push({
+          field: `tools[${i}].parameters`,
+          reason: t("warn.droppedSchemaKeywords", {
+            keywords: Array.from(droppedKeywords).join(", "),
+          }),
+        });
+      }
+      declarations.push({
+        name,
+        description,
+        parameters: legacySchema,
+      });
+    } else {
+      declarations.push({
+        name,
+        description,
+        parametersJsonSchema: normalized,
+      });
+    }
   }
 
-  return declarations.length > 0 ? { functionDeclarations: declarations } : undefined;
+  const declWrapper = declarations.length > 0 ? { functionDeclarations: declarations } : undefined;
+  return {
+    declarations: declWrapper,
+    functionDeclarations: declWrapper ? declarations : undefined,
+    diagnostics,
+  };
 }
 
 /**
