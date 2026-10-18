@@ -6,6 +6,7 @@ import { buildEnvelope, newRequestIdentity, type GeminiContent } from "../antigr
 import { isDefinitive, ClientDisconnectedError, UpstreamError } from "../antigravity/errors.js";
 import { readSse, streamGenerate } from "../antigravity/rpc.js";
 import { noopLogger, type Logger } from "../logger.js";
+import { formatCitationsFooter, type GroundingMetadata } from "./grounding.js";
 import { normalizeToolCalls } from "./tools.js";
 import { rememberSignature } from "./signatures.js";
 import type { Warning } from "./diagnostics.js";
@@ -29,6 +30,7 @@ export interface TurnResult {
   toolCalls: Array<{ id: string; name: string; arguments: string; thoughtSignature?: string }>;
   blockedReason?: string;
   warnings?: Warning[];
+  groundingMetadata?: GroundingMetadata;
 }
 
 export interface TurnInput {
@@ -44,6 +46,7 @@ export interface TurnInput {
   stopSequences?: string[];
   responseMimeType?: string;
   responseSchema?: unknown;
+  enableWebSearch?: boolean;
 }
 
 export interface TurnOutcome {
@@ -268,6 +271,7 @@ export class TurnRunner {
       stopSequences: input.stopSequences,
       responseMimeType: input.responseMimeType,
       responseSchema: input.responseSchema,
+      enableWebSearch: input.enableWebSearch,
     });
 
     const response = await streamGenerate(accessToken, envelope, {
@@ -282,6 +286,7 @@ export class TurnRunner {
     let blockedReason: string | undefined;
     let usage: TurnResult["usage"] = null;
     let sawFinish = false;
+    let latestGrounding: GroundingMetadata | undefined;
     const warnings: Warning[] = [];
     const toolParts: Array<Record<string, unknown>> = [];
 
@@ -292,6 +297,12 @@ export class TurnRunner {
           candidate?.promptFeedback?.blockReason ?? chunk.response?.promptFeedback?.blockReason;
         if (chunkBlocked && !blockedReason) {
           blockedReason = chunkBlocked;
+        }
+
+        const chunkGrounding = (candidate?.groundingMetadata ??
+          chunk.response?.groundingMetadata) as GroundingMetadata | undefined;
+        if (chunkGrounding) {
+          latestGrounding = chunkGrounding;
         }
 
         for (const part of candidate?.content?.parts ?? []) {
@@ -357,6 +368,14 @@ export class TurnRunner {
       throw failure;
     }
 
+    if (!blockedReason) {
+      const citationsFooter = formatCitationsFooter(latestGrounding);
+      if (citationsFooter) {
+        content += citationsFooter;
+        opts.onDelta?.(citationsFooter);
+      }
+    }
+
     if (blockedReason) {
       warnings.push({
         field: "promptFeedback",
@@ -406,6 +425,7 @@ export class TurnRunner {
       usage,
       toolCalls,
       ...(warnings.length > 0 ? { warnings } : {}),
+      ...(latestGrounding ? { groundingMetadata: latestGrounding } : {}),
     };
   }
 }

@@ -129,6 +129,7 @@ export interface StreamChunk {
     candidates?: StreamCandidate[];
     usageMetadata?: UsageMetadata;
     promptFeedback?: { blockReason?: string };
+    groundingMetadata?: unknown;
   };
 }
 

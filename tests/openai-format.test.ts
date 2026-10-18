@@ -23,6 +23,26 @@ describe("buildCompletion", () => {
     expect(out.usage?.total_tokens).toBe(4);
   });
 
+  it("attaches grounding_metadata when groundingMetadata is present", () => {
+    const out = buildCompletion(
+      {
+        content: "ola",
+        finishReason: "stop",
+        usage: null,
+        toolCalls: [],
+        groundingMetadata: {
+          webSearchQueries: ["query 1"],
+          groundingChunks: [{ web: { uri: "https://example.com", title: "Example" } }],
+        },
+      },
+      "gemini-3.8-flash",
+    );
+    expect(out.choices[0]?.message.grounding_metadata).toEqual({
+      webSearchQueries: ["query 1"],
+      sources: [{ title: "Example", url: "https://example.com" }],
+    });
+  });
+
   it("nulls the content and fills tool_calls when there are calls", () => {
     const out = buildCompletion(
       {

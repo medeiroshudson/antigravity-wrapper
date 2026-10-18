@@ -3,6 +3,11 @@
 
 import { randomUUID } from "node:crypto";
 import type { Warning } from "../chat/diagnostics.js";
+import {
+  extractStructuredGrounding,
+  type GroundingMetadata,
+  type StructuredGrounding,
+} from "../chat/grounding.js";
 
 export interface TurnResult {
   content: string;
@@ -10,6 +15,7 @@ export interface TurnResult {
   usage: Usage | null;
   toolCalls: Array<{ id: string; name: string; arguments: string; thoughtSignature?: string }>;
   warnings?: Warning[];
+  groundingMetadata?: GroundingMetadata;
 }
 
 export type CompletionUsage = {
@@ -41,7 +47,12 @@ export type CompletionToolCall = {
 
 export type CompletionChoice = {
   index: number;
-  message: { role: string; content: string | null; tool_calls?: CompletionToolCall[] };
+  message: {
+    role: string;
+    content: string | null;
+    tool_calls?: CompletionToolCall[];
+    grounding_metadata?: StructuredGrounding;
+  };
   finish_reason: string | null;
 };
 
@@ -65,7 +76,12 @@ export type DeltaToolCall = {
 };
 
 /** The role rides the first delta of a stream, per the OpenAI shape. */
-export type DeltaContent = { role?: string; content?: string; tool_calls?: DeltaToolCall[] };
+export type DeltaContent = {
+  role?: string;
+  content?: string;
+  tool_calls?: DeltaToolCall[];
+  grounding_metadata?: StructuredGrounding;
+};
 
 export type ChatCompletionChunk = {
   id: string;
@@ -141,6 +157,12 @@ export function buildCompletionWithId(
                   ...(c.thoughtSignature ? { thoughtSignature: c.thoughtSignature } : {}),
                 })),
               }
+            : {}),
+          ...(result.groundingMetadata
+            ? (() => {
+                const structured = extractStructuredGrounding(result.groundingMetadata);
+                return structured ? { grounding_metadata: structured } : {};
+              })()
             : {}),
         },
         finish_reason: result.finishReason,
