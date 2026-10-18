@@ -89,6 +89,29 @@ describe("GET /v1/models", () => {
     expect(model).toEqual({ id: "gemini-9.9-flash", object: "model", owned_by: "antigravity", display_name: "Gemini 9.9 Flash" });
   });
 
+  it("exposes gemini-3.1-flash-image and dall-e-3 image models", async () => {
+    applyCatalog([
+      {
+        id: "gemini-3.1-flash-image",
+        displayName: "Gemini 3.1 Flash Image",
+        maxTokens: null,
+        maxOutputTokens: null,
+        supportsThinking: false,
+        thinkingBudget: null,
+      },
+    ]);
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/models",
+      headers: auth,
+    });
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as { data: Array<{ id: string }> };
+    const ids = body.data.map((m) => m.id);
+    expect(ids).toContain("gemini-3.1-flash-image");
+    expect(ids).toContain("dall-e-3");
+  });
+
   it("returns an empty list when nothing has been discovered", async () => {
     const response = await app.inject({ method: "GET", url: "/v1/models", headers: auth });
     // No catalog means no models: advertising a static fallback is what produced the

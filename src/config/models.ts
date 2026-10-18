@@ -93,7 +93,7 @@ const FALLBACK_MAX_OUTPUT_TOKENS = 64_000;
 function isCatalogModel(id: string): boolean {
   if (!/^(gemini-|claude-|gpt-)/i.test(id)) return false;
   if (/^(chat_|tab_)/i.test(id)) return false;
-  if (/image/i.test(id)) return false;
+  if (/image/i.test(id) && id.toLowerCase() !== "gemini-3.1-flash-image") return false;
   return true;
 }
 
@@ -164,6 +164,16 @@ export function applyCatalog(entries: readonly CatalogEntry[]): void {
       maxTokens: entry.maxOutputTokens ?? 0,
       variants: [variant],
     });
+
+    if (base === "gemini-3.1-flash-image" && !registry.has("dall-e-3")) {
+      registry.set("dall-e-3", {
+        id: "dall-e-3",
+        label: "DALL·E 3",
+        contextWindow: entry.maxTokens ?? 0,
+        maxTokens: entry.maxOutputTokens ?? 0,
+        variants: [variant],
+      });
+    }
   }
 }
 

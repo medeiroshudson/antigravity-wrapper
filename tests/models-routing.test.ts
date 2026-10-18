@@ -130,11 +130,11 @@ describe("the registry", () => {
     expect(ids).toContain("claude-opus-4-6");
   });
 
-  it("ignores ids outside the families, the internals and the image models", () => {
+  it("ignores ids outside the families, the internals and unsupported image models", () => {
     applyCatalog([
       { id: "chat_20706", displayName: "-", maxTokens: 1, maxOutputTokens: 1, supportsThinking: false, thinkingBudget: null },
       { id: "tab_flash_lite_preview", displayName: "-", maxTokens: 1, maxOutputTokens: 1, supportsThinking: false, thinkingBudget: null },
-      { id: "gemini-3.1-flash-image", displayName: "Gemini 3.1 Flash Image", maxTokens: 1, maxOutputTokens: 1, supportsThinking: false, thinkingBudget: null },
+      { id: "gemini-3-pro-image", displayName: "Gemini 3 Pro Image", maxTokens: 1, maxOutputTokens: 1, supportsThinking: false, thinkingBudget: null },
       { id: "llama-4-scout", displayName: "Llama 4 Scout", maxTokens: 1, maxOutputTokens: 1, supportsThinking: false, thinkingBudget: null },
     ]);
     expect(getPublicModels()).toEqual([]);
