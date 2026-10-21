@@ -11,6 +11,7 @@ import {
 
 export interface TurnResult {
   content: string;
+  reasoningContent?: string;
   finishReason: string;
   usage: Usage | null;
   toolCalls: Array<{ id: string; name: string; arguments: string; thoughtSignature?: string }>;
@@ -50,6 +51,7 @@ export type CompletionChoice = {
   message: {
     role: string;
     content: string | null;
+    reasoning_content?: string;
     tool_calls?: CompletionToolCall[];
     grounding_metadata?: StructuredGrounding;
   };
@@ -79,6 +81,7 @@ export type DeltaToolCall = {
 export type DeltaContent = {
   role?: string;
   content?: string;
+  reasoning_content?: string;
   tool_calls?: DeltaToolCall[];
   grounding_metadata?: StructuredGrounding;
 };
@@ -146,6 +149,7 @@ export function buildCompletionWithId(
         message: {
           role: "assistant",
           content: result.toolCalls.length > 0 ? result.content || null : result.content,
+          ...(result.reasoningContent ? { reasoning_content: result.reasoningContent } : {}),
           ...(result.toolCalls.length > 0
             ? {
                 tool_calls: result.toolCalls.map((c) => ({

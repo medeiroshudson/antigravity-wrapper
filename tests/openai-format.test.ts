@@ -5,6 +5,7 @@ import {
   sseEvent,
   SSE_DONE,
   toOpenAIErrorBody,
+  type TurnResult,
 } from "../src/lib/openai-format/index.js";
 
 describe("buildCompletion", () => {
@@ -21,6 +22,33 @@ describe("buildCompletion", () => {
     expect(out.object).toBe("chat.completion");
     expect(out.choices[0]?.message.content).toBe("ola");
     expect(out.usage?.total_tokens).toBe(4);
+  });
+
+  it("includes reasoning_content in completion message when present", () => {
+    const result: TurnResult = {
+      content: "Final answer",
+      reasoningContent: "Thinking step by step...",
+      finishReason: "stop",
+      usage: null,
+      toolCalls: [],
+    };
+    const completion = buildCompletion(result, "gemini-3.8-flash");
+    expect(completion.choices[0]?.message.reasoning_content).toBe("Thinking step by step...");
+    expect(completion.choices[0]?.message.content).toBe("Final answer");
+  });
+
+  it("supports reasoning_content alongside tool_calls in completion", () => {
+    const result: TurnResult = {
+      content: "",
+      reasoningContent: "I need to call get_weather",
+      finishReason: "tool_calls",
+      usage: null,
+      toolCalls: [{ id: "call_1", name: "get_weather", arguments: "{}" }],
+    };
+    const completion = buildCompletion(result, "gemini-3.8-flash");
+    expect(completion.choices[0]?.message.reasoning_content).toBe("I need to call get_weather");
+    expect(completion.choices[0]?.message.tool_calls).toHaveLength(1);
+    expect(completion.choices[0]?.message.content).toBeNull();
   });
 
   it("attaches grounding_metadata when groundingMetadata is present", () => {
@@ -142,6 +170,12 @@ describe("buildChunk and sseEvent", () => {
     expect(chunk.choices[0]?.delta.content).toBe("oi");
     expect(chunk).not.toHaveProperty("warnings");
     expect(chunk).not.toHaveProperty("usage");
+  });
+
+  it("includes reasoning_content in delta chunk when present", () => {
+    const chunk = buildChunk("id-1", "gemini-3.8-flash", 1234567890, { reasoning_content: "Thinking..." }, null);
+    expect(chunk.choices[0]?.delta.reasoning_content).toBe("Thinking...");
+    expect(chunk.choices[0]?.delta.content).toBeUndefined();
   });
 
   it("attaches warnings and usage to chunk when provided in options", () => {
