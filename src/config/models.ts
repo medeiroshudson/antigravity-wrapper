@@ -13,18 +13,18 @@ export class InvalidEffortError extends Error {
 
 /**
  * Normalizes reasoning effort input.
- * Undefined, null, or empty string falls back to "off".
+ * Undefined, null, empty string, or non-string falls back to "medium" per OpenAI standard.
  * An unrecognized non-empty string throws InvalidEffortError (spec D6).
  */
 export function normalizeEffort(raw: unknown): ReasoningEffort {
-  if (raw === undefined || raw === null || raw === "") return "off";
+  if (raw === undefined || raw === null || raw === "") return "medium";
   if (typeof raw === "string") {
     if ((EFFORTS as readonly string[]).includes(raw)) {
       return raw as ReasoningEffort;
     }
     throw new InvalidEffortError(raw);
   }
-  return "off";
+  return "medium";
 }
 
 /** One entry as the catalog reports it. Numbers are null when the backend omits them. */
