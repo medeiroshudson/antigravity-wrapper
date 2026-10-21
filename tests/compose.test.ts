@@ -297,5 +297,45 @@ describe("toContents", () => {
       functionResponse: { name: "toolB", id: "call_duplicate" },
     });
   });
+
+  it("correctly pairs intra-turn batch tool responses arriving out-of-order", () => {
+    const messages = [
+      { role: "user", content: "run batch tools" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          { id: "call_alpha", type: "function", function: { name: "funcAlpha", arguments: "{}" } },
+          { id: "call_beta", type: "function", function: { name: "funcBeta", arguments: "{}" } },
+        ],
+      },
+      // Responses arrive in reverse order: beta then alpha
+      {
+        role: "tool",
+        tool_call_id: "call_beta",
+        content: "result Beta",
+      },
+      {
+        role: "tool",
+        tool_call_id: "call_alpha",
+        content: "result Alpha",
+      },
+    ];
+
+    const out = toContents(messages, { strictThoughtSignatures: false });
+    // Turn 0: user "run batch tools"
+    // Turn 1: model [funcAlpha, funcBeta]
+    // Turn 2: user [funcBeta response, funcAlpha response]
+    const userTurn = out.contents[2];
+    expect(userTurn?.role).toBe("user");
+    expect(userTurn?.parts).toHaveLength(2);
+
+    expect(userTurn?.parts[0]).toMatchObject({
+      functionResponse: { name: "funcBeta", id: "call_beta" },
+    });
+    expect(userTurn?.parts[1]).toMatchObject({
+      functionResponse: { name: "funcAlpha", id: "call_alpha" },
+    });
+  });
 });
 

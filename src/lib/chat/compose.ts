@@ -152,6 +152,7 @@ export function toContents(
         const name = call.function?.name;
         if (typeof call.id === "string" && call.id && typeof name === "string" && name) {
           activeToolNames.set(call.id, name);
+          activeTextualized.delete(call.id);
         }
       }
       for (let callIdx = 0; callIdx < toolCalls.length; callIdx++) {
