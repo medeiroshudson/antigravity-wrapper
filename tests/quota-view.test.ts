@@ -105,6 +105,36 @@ describe("toGroupsView", () => {
     expect(groups).toHaveLength(1);
     expect(groups[0]?.buckets).toHaveLength(2);
   });
+
+  it("exposes window age and pace deficit per bucket", () => {
+    const bucket = row({
+      bucketId: "gemini-5h",
+      window: "5h",
+      remainingFraction: 0.8,
+      resetAt: NOW + 2.5 * 3_600_000,
+    });
+    const [group] = toGroupsView([bucket], NOW);
+
+    // Half of the five-hour window has run and 20% is consumed: the account is 30 points
+    // behind pace, and the integer age is what makes the selector's ranking auditable.
+    expect(group?.buckets[0]?.windowElapsedPercent).toBe(50);
+    expect(group?.buckets[0]?.pacingDeficit).toBeCloseTo(0.3, 10);
+  });
+
+  it("returns null pacing fields when the window cannot be normalized", () => {
+    const [missingReset] = toGroupsView([row({ resetAt: null })], NOW);
+    expect(missingReset?.buckets[0]?.windowElapsedPercent).toBeNull();
+    expect(missingReset?.buckets[0]?.pacingDeficit).toBeNull();
+
+    // An unknown window has no length to normalize against, so it stays unknown rather
+    // than being guessed at (spec D1).
+    const [unknownWindow] = toGroupsView(
+      [row({ bucketId: "gemini-monthly", window: "monthly" })],
+      NOW,
+    );
+    expect(unknownWindow?.buckets[0]?.windowElapsedPercent).toBeNull();
+    expect(unknownWindow?.buckets[0]?.pacingDeficit).toBeNull();
+  });
 });
 
 describe("toLeanPoolQuota", () => {

@@ -301,6 +301,27 @@ describe("management", () => {
     expect(JSON.stringify(body)).not.toContain("refresh_token");
   });
 
+  it("exposes pacing fields on the detailed bucket view", async () => {
+    store.replaceQuota("a1", [{
+      bucketId: "gemini-5h", window: "5h", displayName: null, groupName: "Gemini Models",
+      groupDescription: null, bucketDescription: null, remainingFraction: 0.8,
+      resetAt: Date.now() + 2.5 * 3_600_000, fetchedAt: Date.now(),
+    }]);
+    const response = await app.inject({ method: "GET", url: "/admin/accounts/a1", headers: auth });
+    // The route runs on the real clock, so the exact age cannot be asserted here: what
+    // matters is that both fields are present, numeric, and in range on the wire.
+    const body = response.json() as {
+      groups: Array<{ buckets: Array<Record<string, unknown>> }>;
+    };
+    const bucket = body.groups[0]?.buckets[0] ?? {};
+
+    expect(response.statusCode).toBe(200);
+    expect(typeof bucket.windowElapsedPercent).toBe("number");
+    expect(bucket.windowElapsedPercent).toBeGreaterThanOrEqual(0);
+    expect(bucket.windowElapsedPercent).toBeLessThanOrEqual(100);
+    expect(typeof bucket.pacingDeficit).toBe("number");
+  });
+
   it("exposes the tier as an object on every account view", async () => {
     store.setPaidTier("a1", { id: "g1-pro-tier", name: "Google AI Pro" });
 

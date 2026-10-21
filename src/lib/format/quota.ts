@@ -1,3 +1,4 @@
+import { bucketPacing } from "../accounts/pacing.js";
 import { isEligibleForFamily } from "../accounts/selector.js";
 import type { AccountSnapshot, QuotaBucket } from "../accounts/store.js";
 import { toIsoUtc, toResetPhrase } from "./datetime.js";
@@ -8,6 +9,8 @@ export interface BucketView {
   window: string;
   remainingPercent: number;
   remainingFraction: number;
+  windowElapsedPercent: number | null;
+  pacingDeficit: number | null;
   resetAt: string | null;
   resetsIn: string | null;
   description: string | null;
@@ -49,8 +52,10 @@ export interface LeanPoolQuota {
  * Two questions are answered separately, because conflating them is what produced the
  * misleading number the pool used to report (spec D4). `remainingPercent` reports
  * *capacity*: the mean over every active account reporting the window, cooldown included —
- * a cooldown benches routing, not quota. `available` and `availableAccounts` report
- * *routability*, so "what the view shows" and "what the router may use" cannot drift.
+ * a cooldown benches routing, not quota. `available` keeps its "measured usable capacity"
+ * meaning — at least one active non-cooling account reports the family with every family
+ * bucket above zero — while `availableAccounts` is the routability count from the
+ * selector's own `isEligibleForFamily`, so routing and the view cannot drift.
  * `worstRemainingPercent` keeps the tightest account visible so a healthy mean cannot hide
  * one account about to drain.
  */
@@ -156,7 +161,11 @@ export function toLeanPoolQuota(
  * here, so a client rendering the payload shows what the app shows.
  *
  * `remainingFraction` stays beside the percentage: the integer is what a person reads,
- * the exact number is what explains a selection decision (spec §4 D7).
+ * the exact number is what explains a selection decision (spec §4 D7). The pace fields
+ * carry the selector's own inputs onto the payload — `windowElapsedPercent` as the
+ * read-only integer age and `pacingDeficit` unrounded, because that exact fraction is
+ * what ranked the account (spec D1/D2). Both are `null` when the window cannot be
+ * normalized, and a made-up number there would misrepresent the ranking.
  */
 export function toGroupsView(rows: readonly QuotaBucket[], now: number = Date.now()): GroupView[] {
   const groups = new Map<string, GroupView>();
@@ -178,12 +187,15 @@ export function toGroupsView(rows: readonly QuotaBucket[], now: number = Date.no
       groups.set(name, group);
     }
 
+    const pacing = bucketPacing(row, now);
     group.buckets.push({
       name: row.displayName,
       bucketId: row.bucketId,
       window: row.window,
       remainingPercent: Math.max(0, Math.min(100, Math.round(row.remainingFraction * 100))),
       remainingFraction: row.remainingFraction,
+      windowElapsedPercent: pacing ? Math.round(pacing.elapsedFraction * 100) : null,
+      pacingDeficit: pacing ? pacing.deficit : null,
       resetAt: toIsoUtc(row.resetAt),
       resetsIn: toResetPhrase(row.resetAt, now),
       description: row.bucketDescription,

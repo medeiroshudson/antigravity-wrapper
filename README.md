@@ -425,7 +425,12 @@ curl -s http://127.0.0.1:3000/admin/accounts/account-3f2a91bc77de0d14 \
 
 Returns `{ "account": { … }, "groups": [ … ] }`, where each group is
 `{ name, description, fetchedAt, buckets }` and each bucket is
-`{ name, bucketId, window, remainingPercent, remainingFraction, resetAt, resetsIn, description }`.
+`{ name, bucketId, window, remainingPercent, remainingFraction, windowElapsedPercent, pacingDeficit, resetAt, resetsIn, description }`.
+
+`windowElapsedPercent` is the integer share of the bucket's window already elapsed, and
+`pacingDeficit` is the window's elapsed fraction minus the consumed fraction (positive means
+behind pace). `pacingDeficit` is the value the selector ranks on, and both fields are `null`
+when `resetAt` or the window is unknown.
 
 The group view is the backend's own: **Gemini Models** and **Claude and GPT models**, each
 split into a weekly and a five-hour window. Within a group, models share both windows, and
@@ -521,7 +526,9 @@ curl -s http://127.0.0.1:3000/admin/accounts/quota -H "Authorization: Bearer $AP
 
 The lean pool view (`GET /accounts/quota`) answers two separate questions per family:
 `available` is measured usable capacity, while `availableAccounts` counts the accounts the
-selector can route to right now — the two differ for a free-tier-only or fully drained pool.
+selector can route to right now — the two differ for a free-tier-only (unmeasured but
+routable) pool, where `available` is false and `availableAccounts` is 1. A drained window
+with future resets is neither: `available: false` and `availableAccounts: 0`.
 `observedAt` is the oldest reading behind the aggregate, so staleness is explicit. Inside each
 window, `remainingPercent` is the **pool mean** over the `measuredAccounts` reporting accounts,
 `worstRemainingPercent` the **tightest account**, and `nextResetAt`/`resetsIn` when capacity
