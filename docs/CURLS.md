@@ -133,7 +133,7 @@ See the lean quota summary for the whole pool, with Gemini and Claude/GPT limits
 curl -sS "$BASE/accounts/quota" -H "Authorization: Bearer $KEY"
 ```
 
-Each family includes `available`, plus `5h` and `weekly` objects containing `remainingPercent` and `resetsIn`. The administrative endpoint retains the per-account quota detail:
+Each family includes `available` (measured usable capacity), `availableAccounts` (accounts the selector can route to now) and `observedAt` (oldest reading in the aggregate); each `5h` and `weekly` object carries `remainingPercent` (the pool mean), `worstRemainingPercent` (the tightest account), `measuredAccounts`, and `nextResetAt`/`resetsIn`. The administrative endpoint retains the per-account quota detail:
 
 ```bash
 curl -sS "$BASE/admin/accounts/quota" -H "Authorization: Bearer $KEY"

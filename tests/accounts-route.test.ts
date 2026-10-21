@@ -301,6 +301,27 @@ describe("management", () => {
     expect(JSON.stringify(body)).not.toContain("refresh_token");
   });
 
+  it("exposes pacing fields on the detailed bucket view", async () => {
+    store.replaceQuota("a1", [{
+      bucketId: "gemini-5h", window: "5h", displayName: null, groupName: "Gemini Models",
+      groupDescription: null, bucketDescription: null, remainingFraction: 0.8,
+      resetAt: Date.now() + 2.5 * 3_600_000, fetchedAt: Date.now(),
+    }]);
+    const response = await app.inject({ method: "GET", url: "/admin/accounts/a1", headers: auth });
+    // The route runs on the real clock, so the exact age cannot be asserted here: what
+    // matters is that both fields are present, numeric, and in range on the wire.
+    const body = response.json() as {
+      groups: Array<{ buckets: Array<Record<string, unknown>> }>;
+    };
+    const bucket = body.groups[0]?.buckets[0] ?? {};
+
+    expect(response.statusCode).toBe(200);
+    expect(typeof bucket.windowElapsedPercent).toBe("number");
+    expect(bucket.windowElapsedPercent).toBeGreaterThanOrEqual(0);
+    expect(bucket.windowElapsedPercent).toBeLessThanOrEqual(100);
+    expect(typeof bucket.pacingDeficit).toBe("number");
+  });
+
   it("exposes the tier as an object on every account view", async () => {
     store.setPaidTier("a1", { id: "g1-pro-tier", name: "Google AI Pro" });
 
@@ -432,13 +453,41 @@ describe("management", () => {
     expect(body.activeAccounts).toBe(1);
     expect(body.gemini).toEqual({
       available: true,
-      "5h": { remainingPercent: 95, resetsIn: expect.any(String) },
-      weekly: { remainingPercent: null, resetsIn: null },
+      availableAccounts: 1,
+      observedAt: expect.any(String),
+      "5h": {
+        remainingPercent: 95,
+        worstRemainingPercent: 95,
+        measuredAccounts: 1,
+        nextResetAt: expect.any(String),
+        resetsIn: expect.any(String),
+      },
+      weekly: {
+        remainingPercent: null,
+        worstRemainingPercent: null,
+        measuredAccounts: 0,
+        nextResetAt: null,
+        resetsIn: null,
+      },
     });
     expect(body.claudeGpt).toEqual({
       available: true,
-      "5h": { remainingPercent: 60, resetsIn: expect.any(String) },
-      weekly: { remainingPercent: null, resetsIn: null },
+      availableAccounts: 1,
+      observedAt: expect.any(String),
+      "5h": {
+        remainingPercent: 60,
+        worstRemainingPercent: 60,
+        measuredAccounts: 1,
+        nextResetAt: expect.any(String),
+        resetsIn: expect.any(String),
+      },
+      weekly: {
+        remainingPercent: null,
+        worstRemainingPercent: null,
+        measuredAccounts: 0,
+        nextResetAt: null,
+        resetsIn: null,
+      },
     });
     // In default lean mode, accounts list is omitted
     expect(body.accounts).toBeUndefined();
@@ -491,12 +540,44 @@ describe("management", () => {
     expect(response.statusCode).toBe(200);
     const body = response.json() as Record<string, any>;
     expect(body.activeAccounts).toBe(1);
-    expect(body.gemini.available).toBe(true);
-    expect(body.gemini["5h"].remainingPercent).toBe(95);
-    expect(body.gemini.weekly.remainingPercent).toBe(80);
-    expect(body.claudeGpt.available).toBe(true);
-    expect(body.claudeGpt["5h"].remainingPercent).toBe(60);
-    expect(body.claudeGpt.weekly.remainingPercent).toBe(40);
+    expect(body.gemini).toEqual({
+      available: true,
+      availableAccounts: 1,
+      observedAt: expect.any(String),
+      "5h": {
+        remainingPercent: 95,
+        worstRemainingPercent: 95,
+        measuredAccounts: 1,
+        nextResetAt: expect.any(String),
+        resetsIn: expect.any(String),
+      },
+      weekly: {
+        remainingPercent: 80,
+        worstRemainingPercent: 80,
+        measuredAccounts: 1,
+        nextResetAt: expect.any(String),
+        resetsIn: expect.any(String),
+      },
+    });
+    expect(body.claudeGpt).toEqual({
+      available: true,
+      availableAccounts: 1,
+      observedAt: expect.any(String),
+      "5h": {
+        remainingPercent: 60,
+        worstRemainingPercent: 60,
+        measuredAccounts: 1,
+        nextResetAt: expect.any(String),
+        resetsIn: expect.any(String),
+      },
+      weekly: {
+        remainingPercent: 40,
+        worstRemainingPercent: 40,
+        measuredAccounts: 1,
+        nextResetAt: expect.any(String),
+        resetsIn: expect.any(String),
+      },
+    });
     expect(Array.isArray(body.accounts)).toBe(true);
     expect(body.accounts[0]?.email).toBe("hudson@gmail.com");
   });

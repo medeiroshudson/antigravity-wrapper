@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { order, summarizeQuota } from "../src/lib/accounts/selector.js";
+import { familyBucketPrefix, isEligibleForFamily, order, summarizeQuota } from "../src/lib/accounts/selector.js";
 import type { AccountSnapshot } from "../src/lib/accounts/store.js";
+import { REAL_POOL, REAL_POOL_NOW } from "./fixtures/pool.js";
 
 function account(over: Partial<AccountSnapshot> & { id: string }): AccountSnapshot {
   return {
@@ -24,7 +25,7 @@ function account(over: Partial<AccountSnapshot> & { id: string }): AccountSnapsh
   };
 }
 
-function bucket(bucketId: string, remainingFraction: number) {
+function bucket(bucketId: string, remainingFraction: number, resetAt: number | null = null) {
   return {
     accountId: "x",
     bucketId,
@@ -34,12 +35,14 @@ function bucket(bucketId: string, remainingFraction: number) {
     groupDescription: null,
     bucketDescription: null,
     remainingFraction,
-    resetAt: null,
+    resetAt,
     fetchedAt: Date.now(),
   };
 }
 
 const NOW = 1_000_000;
+const HOUR = 3_600_000;
+const WEEK = 604_800_000;
 
 describe("summarizeQuota", () => {
   it("scores a Gemini model by its group's tightest window", () => {
@@ -298,5 +301,125 @@ describe("order", () => {
       NOW,
     );
     expect(result.map((a) => a.id)).toEqual(["gratuita", "medida"]);
+  });
+});
+
+describe("order — pace deficit", () => {
+  it("ranks the real snapshot 492b -> 123e -> 9a15 (not by absolute remaining)", () => {
+    // Replay of the measured pool (spec §4): 9a15 has the highest remaining fraction but
+    // is ahead of its weekly pace, while 492b is behind on both of its Gemini windows.
+    expect(order(REAL_POOL, "gemini-3.8-flash-high", REAL_POOL_NOW).map((a) => a.id)).toEqual([
+      "account-492b954c1a93c92f",
+      "account-123e90731bac6450",
+      "account-9a15b1ef6fde541a",
+    ]);
+  });
+
+  it("keeps priority above a better pace score", () => {
+    const now = 10_000_000;
+    const halfElapsed = now + 2.5 * HOUR;
+    // Both windows are halfway through, so both accounts are scored. The priority-10
+    // account is exactly on pace (remaining 0.5 => deficit 0) while the priority-0 account
+    // is 0.30 behind (remaining 0.8 => deficit 0.30). Priority is the outer key, so the
+    // worse score still wins and the tolerance band cannot promote the better-scoring one.
+    const priority = account({
+      id: "priority",
+      priority: 10,
+      quota: [bucket("gemini-5h", 0.5, halfElapsed)],
+    });
+    const bestScore = account({
+      id: "best-score",
+      quota: [bucket("gemini-5h", 0.8, halfElapsed)],
+    });
+    expect(
+      order([bestScore, priority], "gemini-3.8-flash-high", now).map((entry) => entry.id),
+    ).toEqual(["priority", "best-score"]);
+  });
+
+  it("scores an account by its tightest window in pace space", () => {
+    const now = 10_000_000;
+    // Both accounts end up with a score of 0.10, but through a different binding window:
+    // A's 5h window is behind pace while B's weekly one is. The tie inside the tolerance
+    // band is broken by least recent use, so B (1000) precedes A (2000).
+    const a = account({
+      id: "a",
+      lastUsedAt: 2_000,
+      quota: [
+        // Half of the 5h window elapsed, 20% consumed => deficit 0.30.
+        bucket("gemini-5h", 0.8, now + 2.5 * HOUR),
+        // 11% of the weekly window elapsed, 1% consumed => deficit 0.10, the tightest one.
+        bucket("gemini-weekly", 0.99, now + 0.89 * WEEK),
+      ],
+    });
+    const b = account({
+      id: "b",
+      lastUsedAt: 1_000,
+      quota: [
+        // 20% of the 5h window elapsed, 10% consumed => deficit 0.10, the tightest one.
+        bucket("gemini-5h", 0.9, now + 4 * HOUR),
+        // 26% of the weekly window elapsed, 6% consumed => deficit 0.20.
+        bucket("gemini-weekly", 0.94, now + 0.74 * WEEK),
+      ],
+    });
+    expect(order([a, b], "gemini-3.8-flash-high", now).map((entry) => entry.id)).toEqual(["b", "a"]);
+  });
+
+  it("rotates accounts inside the tolerance band by oldest lastUsedAt", () => {
+    const now = 10_000_000;
+    const halfElapsed = now + 2.5 * HOUR;
+    // A 0.30 and B 0.295 are inside the 0.02 band, so the older use wins: B (500) before
+    // A (1000). C's 0.20 is outside the band and stays last even though it is the least
+    // recently used: fairness must not let a clearly worse score jump the queue.
+    const a = account({ id: "a", lastUsedAt: 1_000, quota: [bucket("gemini-5h", 0.8, halfElapsed)] });
+    const b = account({ id: "b", lastUsedAt: 500, quota: [bucket("gemini-5h", 0.795, halfElapsed)] });
+    const c = account({ id: "c", lastUsedAt: 0, quota: [bucket("gemini-5h", 0.7, halfElapsed)] });
+    expect(order([a, b, c], "gemini-3.8-flash-high", now).map((entry) => entry.id)).toEqual(["b", "a", "c"]);
+  });
+
+  it("breaks a pace tie deterministically by lastUsedAt, then id", () => {
+    const now = 10_000_000;
+    const resetAt = now + 2.5 * HOUR;
+    // Identical score and lastUsedAt: the id is the final key, so input order cannot leak
+    // into the ranking through sort stability.
+    const alpha = account({ id: "alpha", lastUsedAt: 500, quota: [bucket("gemini-5h", 0.8, resetAt)] });
+    const beta = account({ id: "beta", lastUsedAt: 500, quota: [bucket("gemini-5h", 0.8, resetAt)] });
+    expect(order([beta, alpha], "gemini-3.8-flash-high", now).map((entry) => entry.id)).toEqual(["alpha", "beta"]);
+  });
+
+  it("keeps the unscored fallback for buckets without resetAt", () => {
+    const now = 10_000_000;
+    // A bucket without resetAt cannot be normalized into pace space, so its account ranks
+    // in the legacy tier below every scored account, even one with less absolute quota;
+    // among unscored accounts the legacy quota-descending order is preserved.
+    const scored = account({ id: "scored", quota: [bucket("gemini-5h", 0.6, now + 2.5 * HOUR)] });
+    const freshUnscored = account({ id: "fresh-unscored", lastUsedAt: 900, quota: [bucket("gemini-5h", 0.99)] });
+    const lowUnscored = account({ id: "low-unscored", lastUsedAt: 100, quota: [bucket("gemini-5h", 0.5)] });
+    expect(order([freshUnscored, lowUnscored, scored], "gemini-3.8-flash-high", now).map((entry) => entry.id)).toEqual([
+      "scored",
+      "fresh-unscored",
+      "low-unscored",
+    ]);
+  });
+});
+
+describe("isEligibleForFamily", () => {
+  it("keeps a cooling account eligible for the family that still has quota", () => {
+    const cooling = account({
+      id: "cooling",
+      status: "cooldown",
+      cooldownUntil: NOW + 1_000,
+      quota: [bucket("gemini-5h", 0.5)],
+    });
+    expect(isEligibleForFamily(cooling, "gemini-", NOW)).toBe(true);
+    // No 3p row means the drained family is unmeasured, so the active cooldown stays
+    // binding there, and an unknown model family has no quota to vouch for it either.
+    expect(isEligibleForFamily(cooling, "3p-", NOW)).toBe(false);
+    expect(isEligibleForFamily(cooling, null, NOW)).toBe(false);
+  });
+
+  it("maps models to bucket prefixes", () => {
+    expect(familyBucketPrefix("gemini-3.8-flash")).toBe("gemini-");
+    expect(familyBucketPrefix("claude-opus-4-6-thinking")).toBe("3p-");
+    expect(familyBucketPrefix("unknown-model")).toBeNull();
   });
 });
