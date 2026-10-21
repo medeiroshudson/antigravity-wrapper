@@ -472,6 +472,12 @@ export async function chatRoutes(
     try {
       const { result, accountId } = await runner.run(turnInput, {
         signal: disconnect.signal,
+        onReasoningDelta: (text) => {
+          if (disconnect.signal.aborted || reply.raw.destroyed) {
+            throw new ClientDisconnectedError(t("chat.clientDisconnected"));
+          }
+          writeChunk({ reasoning_content: text }, null);
+        },
         onDelta: (text) => {
           if (disconnect.signal.aborted || reply.raw.destroyed) {
             throw new ClientDisconnectedError(t("chat.clientDisconnected"));

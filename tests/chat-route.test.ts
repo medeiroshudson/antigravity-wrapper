@@ -1301,3 +1301,92 @@ describe("request logging", () => {
   });
 });
 
+describe("reasoning_content on the OpenAI surface", () => {
+  it("streams reasoning_content deltas before content deltas", async () => {
+    const sseChunks = [
+      'data: {"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"Thinking..."}]}}]}}\n\n',
+      'data: {"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":" further..."}]}}]}}\n\n',
+      'data: {"response":{"candidates":[{"content":{"parts":[{"text":"Done"}]}}]}}\n\n',
+      'data: {"response":{"candidates":[{"finishReason":"STOP"}]}}\n\n',
+      "data: [DONE]\n\n",
+    ].join("");
+    app = buildServer("test-key", { store, env: ENV, fetchImpl: fetchOk(sseChunks), logger: false });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: { model: "gemini-3.8-flash", stream: true, messages: [{ role: "user", content: "hi" }] },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const lines = response.body.split("\n\n").filter((l) => l.startsWith("data: ") && !l.includes("[DONE]"));
+    const chunks = lines.map((l) => JSON.parse(l.slice(6)));
+
+    const reasoningChunks = chunks.filter((c) => c.choices?.[0]?.delta?.reasoning_content);
+    expect(reasoningChunks).toHaveLength(2);
+    expect(reasoningChunks[0].choices[0].delta.reasoning_content).toBe("Thinking...");
+    expect(reasoningChunks[0].choices[0].delta.role).toBe("assistant");
+    expect(reasoningChunks[1].choices[0].delta.reasoning_content).toBe(" further...");
+    expect(reasoningChunks[1].choices[0].delta.role).toBeUndefined();
+
+    const contentChunk = chunks.find((c) => c.choices?.[0]?.delta?.content === "Done");
+    expect(contentChunk).toBeDefined();
+    expect(contentChunk?.choices[0].delta.role).toBeUndefined();
+  });
+
+  it("streams reasoning_content followed by tool_calls deltas", async () => {
+    const sseChunks = [
+      'data: {"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"Calling tool..."}]}}]}}\n\n',
+      'data: {"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"f","args":{},"id":"c1"},"thoughtSignature":"SIG"}]}}]}}\n\n',
+      'data: {"response":{"candidates":[{"finishReason":"STOP"}]}}\n\n',
+      "data: [DONE]\n\n",
+    ].join("");
+    app = buildServer("test-key", { store, env: ENV, fetchImpl: fetchOk(sseChunks), logger: false });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: {
+        model: "gemini-3.8-flash",
+        stream: true,
+        messages: [{ role: "user", content: "hi" }],
+        tools: [{ type: "function", function: { name: "f" } }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const lines = response.body.split("\n\n").filter((l) => l.startsWith("data: ") && !l.includes("[DONE]"));
+    const chunks = lines.map((l) => JSON.parse(l.slice(6)));
+
+    const reasoningIdx = chunks.findIndex((c) => c.choices?.[0]?.delta?.reasoning_content);
+    const toolCallIdx = chunks.findIndex((c) => c.choices?.[0]?.delta?.tool_calls);
+
+    expect(reasoningIdx).toBeGreaterThanOrEqual(0);
+    expect(toolCallIdx).toBeGreaterThan(reasoningIdx);
+    expect(chunks[reasoningIdx].choices[0].delta.reasoning_content).toBe("Calling tool...");
+    expect(chunks[toolCallIdx].choices[0].delta.tool_calls[0].function.name).toBe("f");
+  });
+
+  it("returns reasoning_content in non-streaming completion", async () => {
+    const sseChunks = [
+      'data: {"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"Let me think."},{"text":"Here is the answer."}]},"finishReason":"STOP"}]}}\n\n',
+      "data: [DONE]\n\n",
+    ].join("");
+    app = buildServer("test-key", { store, env: ENV, fetchImpl: fetchOk(sseChunks), logger: false });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: {
+        model: "gemini-3.8-flash",
+        messages: [{ role: "user", content: "hi" }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.choices[0].message.content).toBe("Here is the answer.");
+    expect(body.choices[0].message.reasoning_content).toBe("Let me think.");
+  });
+});
+
