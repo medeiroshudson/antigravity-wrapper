@@ -216,6 +216,17 @@ describe("normalizeToolCalls", () => {
     expect(normalizeToolCalls([{ functionCall: { name: "f", args: {} } }])[0]?.id).toMatch(/^call_/);
   });
 
+  it("guarantees unique tool call IDs when upstream emits colliding IDs across invocations", () => {
+    const part = { functionCall: { name: "test_fn", args: {}, id: "call_22930" } };
+    const first = normalizeToolCalls([part]);
+    const second = normalizeToolCalls([part]);
+
+    expect(first[0]?.id).toBeDefined();
+    expect(second[0]?.id).toBeDefined();
+    expect(first[0]?.id).not.toBe(second[0]?.id);
+    expect(first[0]?.id).toMatch(/^call_22930_/);
+  });
+
   it("ignores parts without functionCall", () => {
     expect(normalizeToolCalls([{ text: "oi" }])).toEqual([]);
   });
