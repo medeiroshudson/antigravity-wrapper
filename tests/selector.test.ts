@@ -315,6 +315,27 @@ describe("order — pace deficit", () => {
     ]);
   });
 
+  it("keeps priority above a better pace score", () => {
+    const now = 10_000_000;
+    const halfElapsed = now + 2.5 * HOUR;
+    // Both windows are halfway through, so both accounts are scored. The priority-10
+    // account is exactly on pace (remaining 0.5 => deficit 0) while the priority-0 account
+    // is 0.30 behind (remaining 0.8 => deficit 0.30). Priority is the outer key, so the
+    // worse score still wins and the tolerance band cannot promote the better-scoring one.
+    const priority = account({
+      id: "priority",
+      priority: 10,
+      quota: [bucket("gemini-5h", 0.5, halfElapsed)],
+    });
+    const bestScore = account({
+      id: "best-score",
+      quota: [bucket("gemini-5h", 0.8, halfElapsed)],
+    });
+    expect(
+      order([bestScore, priority], "gemini-3.8-flash-high", now).map((entry) => entry.id),
+    ).toEqual(["priority", "best-score"]);
+  });
+
   it("scores an account by its tightest window in pace space", () => {
     const now = 10_000_000;
     // Both accounts end up with a score of 0.10, but through a different binding window:

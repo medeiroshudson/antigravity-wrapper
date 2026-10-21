@@ -1,7 +1,7 @@
 # Antigravity Wrapper
 
 An OpenAI-compatible API in front of Google Antigravity / Cloud Code Assist models,
-backed by a **pool of Google accounts** that is load-balanced by remaining quota.
+backed by a **pool of Google accounts** that is load-balanced by time-normalized quota pace.
 
 Point any OpenAI client at this service's `baseURL` and you get the Antigravity model
 catalog without knowing anything about the `v1internal` protocol. Requests are spread
@@ -429,7 +429,9 @@ Returns `{ "account": { … }, "groups": [ … ] }`, where each group is
 
 `windowElapsedPercent` is the integer share of the bucket's window already elapsed, and
 `pacingDeficit` is the window's elapsed fraction minus the consumed fraction (positive means
-behind pace). `pacingDeficit` is the value the selector ranks on, and both fields are `null`
+behind pace). Per bucket `pacingDeficit` is an input to the ranking, not the rank itself: the
+selector scores an account by the **minimum deficit across the requested model's family
+windows**, so one fresh window cannot hide a nearly spent sibling. Both fields are `null`
 when `resetAt` or the window is unknown.
 
 The group view is the backend's own: **Gemini Models** and **Claude and GPT models**, each
@@ -511,6 +513,8 @@ curl -s http://127.0.0.1:3000/admin/accounts/quota -H "Authorization: Bearer $AP
               "window": "weekly",
               "remainingPercent": 99,
               "remainingFraction": 0.99093425,
+              "windowElapsedPercent": 16,
+              "pacingDeficit": 0.1516,
               "resetAt": "2026-10-19T20:43:54Z",
               "resetsIn": "5d 21h",
               "description": "You have used some of your weekly limit, it will fully refresh in 5 days, 21 hours."
@@ -550,12 +554,13 @@ Three things this payload cannot tell you on its own:
   in rotation, ordered after the accounts whose quota is measurable.
 
 This is the data the selection order is built from, so it is the view to check when you
-want to confirm the pool is actually being balanced by quota rather than by round-robin.
+want to confirm the pool is actually being balanced by measured quota and window pace rather
+than by round-robin.
 A group appears only after a refresh has measured it, so a freshly added account shows
 `groups: []` — with `quotaSummaryError` set when the backend refuses the summary, as it does
-for a free-tier account — and is treated as *unknown* by the selector: sorted last, not
-assumed full. Availability, quota groups and reset times are returned by the service and
-differ per account.
+for a free-tier account — and is treated as *unknown* by the selector: sorted after the
+measured accounts, not assumed full. Availability, quota groups and reset times are returned
+by the service and differ per account.
 
 ### Date formats
 
@@ -979,17 +984,24 @@ of the pool. Candidates are ordered like this:
 
 1. **Filter** — keep only accounts that are `enabled` and `active` (or `cooldown` with an
    expiry that has already passed).
-2. **Known quota before unknown** — an account whose quota for the requested model's group
-   has been measured comes first; accounts whose quota is **unknown** come last. Unknown
-   quota is neutral: never zero (which would exclude the account) and never full. An account
-   with no quota summary at all — a free-tier account whose summary the backend refuses, or
-   one whose last refresh failed — lands here, still eligible and still serving requests.
-3. **Descending quota** — within each partition, the highest remaining fraction first. The
-   score is the **lowest fraction across the requested model's group windows**: the weekly
-   and five-hour windows are shared by the whole group, and the tightest one is the binding
-   constraint; ties go to the account used longest ago, which spreads load.
-4. **Priority overrides all of it** — an explicit `priority` sorts ahead of both quota tiers.
-   This is how you place an account whose quota cannot be measured.
+2. **Priority overrides all of it** — an explicit `priority` sorts ahead of quota and pace:
+   the highest level is tried first, and the rules below only order accounts within one
+   level. This is how you place an account whose quota cannot be measured.
+3. **Pace within a priority** — an account with measured, positive quota and at least one
+   normalizable window ranks by its **pace score**: the **minimum deficit across the
+   requested model's group windows**, where a window's deficit is
+   `elapsed fraction − consumed fraction` and the elapsed fraction comes from `resetAt`.
+   The highest score comes first, meaning the account furthest behind its own window's
+   linear pace. Scores within `PACING_TOLERANCE` (0.02) of the best form a band ordered by
+   oldest `lastUsedAt`, then by `id`, so concurrent requests rotate instead of herding on
+   one account.
+4. **Fallback order** — below every scored account in the same priority, a positive-quota
+   account with no normalizable window (no `resetAt`, or an unknown window) falls back to
+   descending remaining quota. Unknown quota follows the measured accounts and stays
+   eligible — never zero (which would exclude the account) and never full; a free-tier
+   account whose summary the backend refuses, or one whose last refresh failed, lands here
+   and keeps serving requests. An account at zero quota is benched while its reset is in the
+   future and is only probed last, once that reset has passed.
 
 **Cooldown on a quota wall.** A `429` carrying a wall signal (`Resets in …`, quota
 exceeded) puts the account in `cooldown` until the reset time the backend named.

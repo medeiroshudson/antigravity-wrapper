@@ -359,6 +359,27 @@ describe("toLeanPoolQuota", () => {
     expect(drained.gemini["5h"].measuredAccounts).toBe(1);
   });
 
+  it("keeps a cooling-only pool routable but not available", () => {
+    // An active cooldown benches routing only for the family that drained; the selector
+    // still deems this account eligible for Gemini because its family quota is positive.
+    // Capacity, however, is measured on usable accounts, so a pool with no non-cooling
+    // account is not available — while its reported fraction stays real, not zeroed.
+    const cooling = makeAccount({
+      id: "cooling",
+      status: "cooldown",
+      cooldownUntil: NOW + 3600_000,
+      quota: [row({ bucketId: "gemini-5h", window: "5h", remainingFraction: 0.8 })],
+    });
+
+    const summary = toLeanPoolQuota([cooling], NOW);
+
+    expect(summary.gemini.available).toBe(false);
+    expect(summary.gemini.availableAccounts).toBe(1);
+    expect(summary.gemini["5h"].remainingPercent).toBe(80);
+    expect(summary.gemini["5h"].worstRemainingPercent).toBe(80);
+    expect(summary.gemini["5h"].measuredAccounts).toBe(1);
+  });
+
   it("reports observedAt as the oldest reading", () => {
     const fresh = makeAccount({
       id: "fresh",

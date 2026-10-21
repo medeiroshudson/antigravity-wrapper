@@ -163,9 +163,10 @@ export function toLeanPoolQuota(
  * `remainingFraction` stays beside the percentage: the integer is what a person reads,
  * the exact number is what explains a selection decision (spec §4 D7). The pace fields
  * carry the selector's own inputs onto the payload — `windowElapsedPercent` as the
- * read-only integer age and `pacingDeficit` unrounded, because that exact fraction is
- * what ranked the account (spec D1/D2). Both are `null` when the window cannot be
- * normalized, and a made-up number there would misrepresent the ranking.
+ * read-only integer age and `pacingDeficit` unrounded. Per bucket the deficit is an input,
+ * not the rank key: the selector scores the account by the minimum deficit across the
+ * family's windows (spec D1/D2). Both are `null` when the window cannot be normalized, and
+ * a made-up number there would misrepresent the ranking.
  */
 export function toGroupsView(rows: readonly QuotaBucket[], now: number = Date.now()): GroupView[] {
   const groups = new Map<string, GroupView>();
