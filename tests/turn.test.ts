@@ -138,6 +138,47 @@ describe("TurnRunner", () => {
     expect(deltas).toEqual(["ola"]);
   });
 
+  it("captures thought parts into reasoningContent and emits onReasoningDelta", async () => {
+    const sseChunks = [
+      'data: {"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"Thinking step 1..."}]}}]}}\n\n',
+      'data: {"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"Thinking step 2..."}]}}]}}\n\n',
+      'data: {"response":{"candidates":[{"content":{"parts":[{"text":"Final answer"}]}}]}}\n\n',
+      'data: {"response":{"candidates":[{"finishReason":"STOP"}]}}\n\n',
+      "data: [DONE]\n\n",
+    ];
+    const fetchImpl = vi.fn(async () => sse(sseChunks)) as unknown as typeof fetch;
+    const runner = new TurnRunner({ accounts: service([snapshot("a1")]), fetchImpl });
+    const reasoningDeltas: string[] = [];
+    const contentDeltas: string[] = [];
+
+    const { result } = await runner.run(BASE, {
+      onReasoningDelta: (t) => reasoningDeltas.push(t),
+      onDelta: (t) => contentDeltas.push(t),
+    });
+
+    expect(reasoningDeltas).toEqual(["Thinking step 1...", "Thinking step 2..."]);
+    expect(contentDeltas).toEqual(["Final answer"]);
+    expect(result.reasoningContent).toBe("Thinking step 1...Thinking step 2...");
+    expect(result.content).toBe("Final answer");
+  });
+
+  it("captures reasoning alongside functionCall parts", async () => {
+    const sseChunks = [
+      'data: {"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"I will call tool"}]}}]}}\n\n',
+      'data: {"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","args":{"q":"test"},"id":"call_1"},"thoughtSignature":"SIG"}]}}]}}\n\n',
+      'data: {"response":{"candidates":[{"finishReason":"STOP"}]}}\n\n',
+      "data: [DONE]\n\n",
+    ];
+    const fetchImpl = vi.fn(async () => sse(sseChunks)) as unknown as typeof fetch;
+    const runner = new TurnRunner({ accounts: service([snapshot("a1")]), fetchImpl });
+
+    const { result } = await runner.run(BASE);
+
+    expect(result.reasoningContent).toBe("I will call tool");
+    expect(result.toolCalls).toHaveLength(1);
+    expect(result.finishReason).toBe("tool_calls");
+  });
+
   it("a client disconnect propagates without burning the next account or the pool", async () => {
     // Measured (2026-10-16): the abort surfaced as a definitive client_error, so the
     // runner started the 2nd account on a dead request and the route crashed the reply
@@ -432,6 +473,37 @@ describe("TurnRunner", () => {
       "connection reset",
     );
     // The second account was never tried: the delta was already on the wire.
+    expect(accounts.applyFailure).not.toHaveBeenCalled();
+  });
+
+  it("in stream mode, after a reasoning delta is emitted, does not switch accounts (fatal after content)", async () => {
+    function truncatedThoughtSse(text: string): Response {
+      let sent = false;
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (!sent) {
+            sent = true;
+            controller.enqueue(
+              new TextEncoder().encode(
+                `data: {"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":"${text}"}]}}]}}\n\n`,
+              ),
+            );
+            return;
+          }
+          controller.error(new Error("connection reset"));
+        },
+      });
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    }
+
+    const fetchImpl = vi.fn(async () => truncatedThoughtSse("thinking...")) as unknown as typeof fetch;
+    const accounts = service([snapshot("a1"), snapshot("a2")]);
+    const runner = new TurnRunner({ accounts, fetchImpl });
+    const reasoningDeltas: string[] = [];
+    await expect(
+      runner.run(BASE, { onReasoningDelta: (t) => reasoningDeltas.push(t) }),
+    ).rejects.toThrow("connection reset");
+    // The second account was never tried: the reasoning delta was already on the wire.
     expect(accounts.applyFailure).not.toHaveBeenCalled();
   });
 

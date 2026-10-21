@@ -31,6 +31,7 @@ export interface TurnResult {
   blockedReason?: string;
   warnings?: Warning[];
   groundingMetadata?: GroundingMetadata;
+  reasoningContent?: string;
 }
 
 export interface TurnInput {
@@ -121,7 +122,7 @@ export class TurnRunner {
 
   async run(
     input: TurnInput,
-    opts: { signal?: AbortSignal; onDelta?: (text: string) => void } = {},
+    opts: { signal?: AbortSignal; onDelta?: (text: string) => void; onReasoningDelta?: (text: string) => void } = {},
   ): Promise<TurnOutcome> {
     const candidates = await this.deps.accounts.orderFor(input.runtimeModel);
     const limit = getMaxFailoverAttempts(this.deps.env);
@@ -250,7 +251,7 @@ export class TurnRunner {
     input: TurnInput,
     accessToken: string,
     projectId: string,
-    opts: { signal?: AbortSignal; onDelta?: (text: string) => void },
+    opts: { signal?: AbortSignal; onDelta?: (text: string) => void; onReasoningDelta?: (text: string) => void },
   ): Promise<TurnResult> {
     const identity = newRequestIdentity(input.runtimeModel);
     const maxOutputTokens = getMaxOutputTokens(input.runtimeModel);
@@ -282,6 +283,7 @@ export class TurnRunner {
     });
 
     let content = "";
+    let reasoningContent = "";
     let rawFinishReason: string | undefined;
     let blockedReason: string | undefined;
     let usage: TurnResult["usage"] = null;
@@ -307,9 +309,14 @@ export class TurnRunner {
 
         for (const part of candidate?.content?.parts ?? []) {
           const text = part.text;
-          if (typeof text === "string" && text.length > 0 && part.thought !== true) {
-            content += text;
-            opts.onDelta?.(text);
+          if (typeof text === "string" && text.length > 0) {
+            if (part.thought === true) {
+              reasoningContent += text;
+              opts.onReasoningDelta?.(text);
+            } else {
+              content += text;
+              opts.onDelta?.(text);
+            }
           }
           if (part.functionCall) toolParts.push(part);
         }
@@ -342,7 +349,7 @@ export class TurnRunner {
       // nothing at all is a failure. The cost of the trade-off is that a body
       // truncated exactly at a chunk boundary reads as complete — which still hands
       // the caller the text that arrived, instead of a 503 that discards it.
-      if (!blockedReason && !sawFinish && content.length === 0 && toolParts.length === 0) {
+      if (!blockedReason && !sawFinish && content.length === 0 && reasoningContent.length === 0 && toolParts.length === 0) {
         throw new UpstreamError("server_error", 0, t("chat.streamWithoutFinishReason"));
       }
     } catch (error) {
@@ -364,7 +371,9 @@ export class TurnRunner {
       // in `stream:false` nothing reached the client until the final JSON, so a
       // recoverable error mid-generation can still fall through to the next
       // account (spec §6.3).
-      if (opts.onDelta && content.length > 0) fatalAfterContent.add(failure);
+      if ((opts.onDelta || opts.onReasoningDelta) && (content.length > 0 || reasoningContent.length > 0)) {
+        fatalAfterContent.add(failure);
+      }
       throw failure;
     }
 
@@ -424,6 +433,7 @@ export class TurnRunner {
       finishReason,
       usage,
       toolCalls,
+      ...(reasoningContent.length > 0 ? { reasoningContent } : {}),
       ...(warnings.length > 0 ? { warnings } : {}),
       ...(latestGrounding ? { groundingMetadata: latestGrounding } : {}),
     };
