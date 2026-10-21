@@ -124,19 +124,13 @@ export function toContents(
   // `name` on an OpenAI tool message is optional and clients pair by tool_call_id, so
   // the authoritative name comes from the paired call; a placeholder ("tool") made the
   // native Gemini path reject the whole request with a generic 400 (measured).
-  const nameByCallId = new Map<string, string>();
-  for (const message of messages) {
-    if ((message.role ?? "").toLowerCase() !== "assistant") continue;
-    for (const call of message.tool_calls ?? []) {
-      const name = call.function?.name;
-      if (typeof call.id === "string" && call.id && typeof name === "string" && name) {
-        nameByCallId.set(call.id, name);
-      }
-    }
-  }
+  // Active tool names are tracked chronologically to prevent tool_call_id collisions
+  // across turns from polluting earlier turns.
+  const activeToolNames = new Map<string, string>();
   // Calls textualized under `strictThoughtSignatures`; their responses must be
   // textualized too, or the orphan functionResponse breaks the same rule.
-  const textualized = new Set<string>();
+  // State is tracked sequentially and removed once the response is consumed.
+  const activeTextualized = new Set<string>();
 
   for (let msgIdx = 0; msgIdx < messages.length; msgIdx++) {
     const message = messages[msgIdx]!;
@@ -154,6 +148,13 @@ export function toContents(
       const text = textOf(message.content);
       if (text) parts.push({ text });
       const toolCalls = message.tool_calls ?? [];
+      for (const call of toolCalls) {
+        const name = call.function?.name;
+        if (typeof call.id === "string" && call.id && typeof name === "string" && name) {
+          activeToolNames.set(call.id, name);
+          activeTextualized.delete(call.id);
+        }
+      }
       for (let callIdx = 0; callIdx < toolCalls.length; callIdx++) {
         const call = toolCalls[callIdx]!;
         const name = call.function?.name;
@@ -171,7 +172,9 @@ export function toContents(
         // authoritative over an echo, which a client may have truncated.
         const signature = (call.id ? recallSignature(call.id) : null) ?? call.thoughtSignature ?? null;
         if (strict && signature === null) {
-          textualized.add(call.id ?? "");
+          if (typeof call.id === "string" && call.id) {
+            activeTextualized.add(call.id);
+          }
           parts.push({ text: `used tool "${name}" with arguments ${call.function?.arguments ?? "{}"}` });
           continue;
         }
@@ -193,13 +196,17 @@ export function toContents(
 
     if (role === "tool") {
       const text = textOf(message.content);
-      if (strict && textualized.has(message.tool_call_id ?? "")) {
+      const callId = message.tool_call_id ?? "";
+      const fallbackName = (message.name && message.name !== "tool" ? message.name : undefined) ?? "tool";
+      const name = (callId ? activeToolNames.get(callId) : undefined) ?? fallbackName;
+
+      if (strict && callId && activeTextualized.has(callId)) {
+        activeTextualized.delete(callId);
         pushTurn(contents, "user", [
-          { text: `tool "${nameByCallId.get(message.tool_call_id ?? "") ?? message.name ?? "tool"}" returned: ${text}` },
+          { text: `tool "${name}" returned: ${text}` },
         ]);
         continue;
       }
-      const name = nameByCallId.get(message.tool_call_id ?? "") ?? message.name ?? "tool";
       const part: GeminiPart = {
         functionResponse: {
           name,

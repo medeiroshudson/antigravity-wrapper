@@ -266,7 +266,11 @@ export function normalizeToolCalls(parts: Array<Record<string, unknown>>): ChatT
   for (const part of parts) {
     const call = asRecord(part.functionCall);
     if (!call || typeof call.name !== "string" || call.name.length === 0) continue;
-    const id = typeof call.id === "string" && call.id.length > 0 ? call.id : `call_${randomUUID()}`;
+    const suffix = randomUUID().replace(/-/g, "").slice(0, 8);
+    const id =
+      typeof call.id === "string" && call.id.length > 0
+        ? `${call.id}_${suffix}`
+        : `call_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
     out.push({
       id,
       type: "function",
