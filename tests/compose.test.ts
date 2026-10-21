@@ -199,5 +199,103 @@ describe("toContents", () => {
       expect.objectContaining({ field: "messages[0].tool_calls[0].function.arguments" })
     );
   });
+
+  it("preserves distinct functionResponse names when tool_call_id is reused across different turns", () => {
+    const messages = [
+      { role: "user", content: "first prompt" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          { id: "call_duplicate", type: "function", function: { name: "toolA", arguments: "{}" } },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "call_duplicate",
+        content: "result A",
+      },
+      { role: "user", content: "second prompt" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          { id: "call_duplicate", type: "function", function: { name: "toolB", arguments: "{}" } },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "call_duplicate",
+        content: "result B",
+      },
+    ];
+
+    const out = toContents(messages, { strictThoughtSignatures: false });
+    // Turn 0: user "first prompt"
+    // Turn 1: model toolA
+    // Turn 2: user functionResponse toolA + "second prompt"
+    // Turn 3: model toolB
+    // Turn 4: user functionResponse toolB
+    const responseTurn1 = out.contents[2]?.parts.find((p) => "functionResponse" in p);
+    const responseTurn2 = out.contents[4]?.parts.find((p) => "functionResponse" in p);
+
+    expect((responseTurn1 as any)?.functionResponse?.name).toBe("toolA");
+    expect((responseTurn2 as any)?.functionResponse?.name).toBe("toolB");
+  });
+
+  it("does not textualize a signed tool call when a prior turn textualized a call with the same ID", () => {
+    const messages = [
+      { role: "user", content: "first prompt" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          { id: "call_duplicate", type: "function", function: { name: "toolA", arguments: "{}" } },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "call_duplicate",
+        content: "result A",
+      },
+      { role: "user", content: "second prompt" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "call_duplicate",
+            type: "function",
+            function: { name: "toolB", arguments: "{}" },
+            thoughtSignature: "SIG-VALID",
+          },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "call_duplicate",
+        content: "result B",
+      },
+    ];
+
+    const out = toContents(messages, { strictThoughtSignatures: true });
+    // In turn 1 (first assistant), call_duplicate had no signature and was textualized.
+    // In turn 2 (tool response A), it was textualized into a user text turn.
+    // In turn 3 (second assistant), call_duplicate HAS a valid signature, so it should NOT be textualized.
+    // In turn 4 (tool response B), it should emit a proper functionResponse with name "toolB".
+    const modelTurn2 = out.contents[3];
+    const userTurn2 = out.contents[4];
+
+    const functionCallPart = modelTurn2?.parts.find((p) => "functionCall" in p);
+    expect(functionCallPart).toMatchObject({
+      functionCall: { name: "toolB", id: "call_duplicate" },
+      thoughtSignature: "SIG-VALID",
+    });
+
+    const functionResponsePart = userTurn2?.parts.find((p) => "functionResponse" in p);
+    expect(functionResponsePart).toMatchObject({
+      functionResponse: { name: "toolB", id: "call_duplicate" },
+    });
+  });
 });
 
