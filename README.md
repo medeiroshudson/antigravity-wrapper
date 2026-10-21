@@ -519,6 +519,17 @@ curl -s http://127.0.0.1:3000/admin/accounts/quota -H "Authorization: Bearer $AP
 }
 ```
 
+The lean pool view (`GET /accounts/quota`) answers two separate questions per family:
+`available` is measured usable capacity, while `availableAccounts` counts the accounts the
+selector can route to right now — the two differ for a free-tier-only or fully drained pool.
+`observedAt` is the oldest reading behind the aggregate, so staleness is explicit. Inside each
+window, `remainingPercent` is the **pool mean** over the `measuredAccounts` reporting accounts,
+`worstRemainingPercent` the **tightest account**, and `nextResetAt`/`resetsIn` when capacity
+first replenishes. `remainingPercent` therefore differs from each account's own reading when
+accounts are in different window phases; the detailed view carries the per-account numbers.
+The mean assumes equal tier capacity (true for an all-Pro pool); mixed tiers would need
+per-tier weights, which are not modeled.
+
 Three things this payload cannot tell you on its own:
 
 - **`resetsIn` is a snapshot, not a fact.** It is true only at the moment of the response;

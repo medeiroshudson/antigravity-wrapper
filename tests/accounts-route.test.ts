@@ -432,13 +432,41 @@ describe("management", () => {
     expect(body.activeAccounts).toBe(1);
     expect(body.gemini).toEqual({
       available: true,
-      "5h": { remainingPercent: 95, resetsIn: expect.any(String) },
-      weekly: { remainingPercent: null, resetsIn: null },
+      availableAccounts: 1,
+      observedAt: expect.any(String),
+      "5h": {
+        remainingPercent: 95,
+        worstRemainingPercent: 95,
+        measuredAccounts: 1,
+        nextResetAt: expect.any(String),
+        resetsIn: expect.any(String),
+      },
+      weekly: {
+        remainingPercent: null,
+        worstRemainingPercent: null,
+        measuredAccounts: 0,
+        nextResetAt: null,
+        resetsIn: null,
+      },
     });
     expect(body.claudeGpt).toEqual({
       available: true,
-      "5h": { remainingPercent: 60, resetsIn: expect.any(String) },
-      weekly: { remainingPercent: null, resetsIn: null },
+      availableAccounts: 1,
+      observedAt: expect.any(String),
+      "5h": {
+        remainingPercent: 60,
+        worstRemainingPercent: 60,
+        measuredAccounts: 1,
+        nextResetAt: expect.any(String),
+        resetsIn: expect.any(String),
+      },
+      weekly: {
+        remainingPercent: null,
+        worstRemainingPercent: null,
+        measuredAccounts: 0,
+        nextResetAt: null,
+        resetsIn: null,
+      },
     });
     // In default lean mode, accounts list is omitted
     expect(body.accounts).toBeUndefined();
@@ -491,12 +519,44 @@ describe("management", () => {
     expect(response.statusCode).toBe(200);
     const body = response.json() as Record<string, any>;
     expect(body.activeAccounts).toBe(1);
-    expect(body.gemini.available).toBe(true);
-    expect(body.gemini["5h"].remainingPercent).toBe(95);
-    expect(body.gemini.weekly.remainingPercent).toBe(80);
-    expect(body.claudeGpt.available).toBe(true);
-    expect(body.claudeGpt["5h"].remainingPercent).toBe(60);
-    expect(body.claudeGpt.weekly.remainingPercent).toBe(40);
+    expect(body.gemini).toEqual({
+      available: true,
+      availableAccounts: 1,
+      observedAt: expect.any(String),
+      "5h": {
+        remainingPercent: 95,
+        worstRemainingPercent: 95,
+        measuredAccounts: 1,
+        nextResetAt: expect.any(String),
+        resetsIn: expect.any(String),
+      },
+      weekly: {
+        remainingPercent: 80,
+        worstRemainingPercent: 80,
+        measuredAccounts: 1,
+        nextResetAt: expect.any(String),
+        resetsIn: expect.any(String),
+      },
+    });
+    expect(body.claudeGpt).toEqual({
+      available: true,
+      availableAccounts: 1,
+      observedAt: expect.any(String),
+      "5h": {
+        remainingPercent: 60,
+        worstRemainingPercent: 60,
+        measuredAccounts: 1,
+        nextResetAt: expect.any(String),
+        resetsIn: expect.any(String),
+      },
+      weekly: {
+        remainingPercent: 40,
+        worstRemainingPercent: 40,
+        measuredAccounts: 1,
+        nextResetAt: expect.any(String),
+        resetsIn: expect.any(String),
+      },
+    });
     expect(Array.isArray(body.accounts)).toBe(true);
     expect(body.accounts[0]?.email).toBe("hudson@gmail.com");
   });

@@ -1,3 +1,4 @@
+import { isEligibleForFamily } from "../accounts/selector.js";
 import type { AccountSnapshot, QuotaBucket } from "../accounts/store.js";
 import { toIsoUtc, toResetPhrase } from "./datetime.js";
 
@@ -21,11 +22,16 @@ export interface GroupView {
 
 export interface WindowQuotaSummary {
   remainingPercent: number | null;
+  worstRemainingPercent: number | null;
+  measuredAccounts: number;
+  nextResetAt: string | null;
   resetsIn: string | null;
 }
 
 export interface FamilyQuotaSummary {
   available: boolean;
+  availableAccounts: number;
+  observedAt: string | null;
   "5h": WindowQuotaSummary;
   weekly: WindowQuotaSummary;
 }
@@ -38,8 +44,15 @@ export interface LeanPoolQuota {
 }
 
 /**
- * Assembles a lean summary of Gemini and Claude/GPT quota across all active accounts in the pool,
- * broken down by the two authoritative windows: 5h and weekly.
+ * Assembles a lean summary of Gemini and Claude/GPT quota across the pool.
+ *
+ * Two questions are answered separately, because conflating them is what produced the
+ * misleading number the pool used to report (spec D4). `remainingPercent` reports
+ * *capacity*: the mean over every active account reporting the window, cooldown included —
+ * a cooldown benches routing, not quota. `available` and `availableAccounts` report
+ * *routability*, so "what the view shows" and "what the router may use" cannot drift.
+ * `worstRemainingPercent` keeps the tightest account visible so a healthy mean cannot hide
+ * one account about to drain.
  */
 export function toLeanPoolQuota(
   accounts: readonly AccountSnapshot[],
@@ -51,60 +64,78 @@ export function toLeanPoolQuota(
     return true;
   });
 
+  const familyBuckets = (account: AccountSnapshot, prefix: string): QuotaBucket[] =>
+    account.quota.filter((row) => row.bucketId.startsWith(prefix));
+
+  const emptyWindow = (): WindowQuotaSummary => ({
+    remainingPercent: null,
+    worstRemainingPercent: null,
+    measuredAccounts: 0,
+    nextResetAt: null,
+    resetsIn: null,
+  });
+
+  /**
+   * Capacity over one window. `accountsWithRows` carries each reporting account's family
+   * rows, so an account counts once however many rows it reports and a window nobody
+   * reports reads as unknown (`null`), never as zero.
+   */
   const summarizeWindow = (
-    accounts: readonly AccountSnapshot[],
-    prefix: string,
+    accountsWithRows: readonly QuotaBucket[][],
     windowName: string,
   ): WindowQuotaSummary => {
-    const windowBuckets = accounts.flatMap((account) => {
-      const inActiveCooldown = account.status === "cooldown" && (account.cooldownUntil ?? 0) > now;
-      return account.quota
-        .filter(
-          (bucket) =>
-            bucket.bucketId.startsWith(prefix) &&
-            bucket.window.toLowerCase() === windowName.toLowerCase(),
-        )
-        .map((bucket) => ({
-          bucket,
-          remainingFraction: inActiveCooldown ? 0 : bucket.remainingFraction,
-        }));
-    });
+    const perAccount = accountsWithRows
+      .map((rows) => rows.filter((row) => row.window.toLowerCase() === windowName))
+      .filter((rows) => rows.length > 0);
+    const rows = perAccount.flatMap((accountRows) => accountRows);
+    if (rows.length === 0) return emptyWindow();
 
-    if (windowBuckets.length === 0) {
-      return { remainingPercent: null, resetsIn: null };
-    }
-
-    const bestFraction = Math.max(...windowBuckets.map(({ remainingFraction }) => remainingFraction));
-    const resetAt = windowBuckets
-      .filter(({ remainingFraction, bucket }) =>
-        remainingFraction === bestFraction && bucket.resetAt !== null && bucket.resetAt > now,
-      )
-      .reduce<number | null>(
-        (earliest, { bucket }) =>
-          earliest === null || (bucket.resetAt !== null && bucket.resetAt < earliest)
-            ? bucket.resetAt
-            : earliest,
-        null,
-      );
+    const fractions = rows.map((row) => row.remainingFraction);
+    const mean = fractions.reduce((total, fraction) => total + fraction, 0) / fractions.length;
+    const nextReset = rows.reduce<number | null>(
+      (earliest, row) =>
+        row.resetAt !== null && row.resetAt > now && (earliest === null || row.resetAt < earliest)
+          ? row.resetAt
+          : earliest,
+      null,
+    );
 
     return {
-      remainingPercent: Math.max(0, Math.min(100, Math.round(bestFraction * 100))),
-      resetsIn: toResetPhrase(resetAt, now),
+      remainingPercent: Math.round(100 * mean),
+      worstRemainingPercent: Math.round(100 * Math.min(...fractions)),
+      measuredAccounts: perAccount.length,
+      nextResetAt: toIsoUtc(nextReset),
+      resetsIn: toResetPhrase(nextReset, now),
     };
   };
 
   const summarizeFamily = (prefix: string): FamilyQuotaSummary => {
-    const accountsWithUsableQuota = active.filter((account) => {
-      const familyBuckets = account.quota.filter((bucket) => bucket.bucketId.startsWith(prefix));
-      if (familyBuckets.length === 0) return false;
+    const reporting = active
+      .map((account) => familyBuckets(account, prefix))
+      .filter((rows) => rows.length > 0);
+    const rows = reporting.flatMap((accountRows) => accountRows);
+
+    // "Measured usable capacity", unchanged from the old view: a family with no positive
+    // bucket on a routable account is not available, even if the selector may still probe
+    // an expired-zero or unknown-quota account for it.
+    const available = active.some((account) => {
+      const familyRows = familyBuckets(account, prefix);
+      if (familyRows.length === 0) return false;
       const inActiveCooldown = account.status === "cooldown" && (account.cooldownUntil ?? 0) > now;
-      return !inActiveCooldown && familyBuckets.every((bucket) => bucket.remainingFraction > 0);
+      return !inActiveCooldown && familyRows.every((row) => row.remainingFraction > 0);
     });
 
     return {
-      available: accountsWithUsableQuota.length > 0,
-      "5h": summarizeWindow(active, prefix, "5h"),
-      weekly: summarizeWindow(active, prefix, "weekly"),
+      available,
+      availableAccounts: active.filter((account) => isEligibleForFamily(account, prefix, now))
+        .length,
+      // Staleness belongs to the whole family: the aggregate is only as fresh as its oldest
+      // reading, even when some accounts refreshed later.
+      observedAt: toIsoUtc(
+        rows.length === 0 ? null : Math.min(...rows.map((row) => row.fetchedAt)),
+      ),
+      "5h": summarizeWindow(reporting, "5h"),
+      weekly: summarizeWindow(reporting, "weekly"),
     };
   };
 
