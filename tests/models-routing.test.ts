@@ -22,11 +22,15 @@ describe("normalizeEffort", () => {
     for (const value of EFFORTS) expect(normalizeEffort(value)).toBe(value);
   });
 
-  it("falls back to off for empty or non-string values", () => {
-    expect(normalizeEffort(undefined)).toBe("off");
-    expect(normalizeEffort(null)).toBe("off");
-    expect(normalizeEffort("")).toBe("off");
-    expect(normalizeEffort(42)).toBe("off");
+  it("defaults to medium for empty, null, undefined or non-string values", () => {
+    expect(normalizeEffort(undefined)).toBe("medium");
+    expect(normalizeEffort(null)).toBe("medium");
+    expect(normalizeEffort("")).toBe("medium");
+    expect(normalizeEffort(42)).toBe("medium");
+  });
+
+  it("preserves explicit off", () => {
+    expect(normalizeEffort("off")).toBe("off");
   });
 
   it("throws an error when reasoning_effort is an unrecognized string", () => {
