@@ -72,6 +72,13 @@ describe("GET /v1/models", () => {
       context_length: 250_000,
       max_model_len: 250_000,
       max_output_tokens: 64_000,
+      architecture: {
+        input_modalities: ["text", "image"],
+        output_modalities: ["text"],
+      },
+      reasoning: {
+        supported_efforts: ["low", "medium", "high", "xhigh"],
+      },
     });
   });
 
@@ -86,10 +93,19 @@ describe("GET /v1/models", () => {
     applyCatalog([{ id: "gemini-9.9-flash-low", displayName: "Gemini 9.9 Flash (Low)", maxTokens: null, maxOutputTokens: null, supportsThinking: false, thinkingBudget: null }]);
     const response = await app.inject({ method: "GET", url: "/v1/models", headers: auth });
     const model = (response.json() as { data: Array<Record<string, unknown>> }).data[0];
-    expect(model).toEqual({ id: "gemini-9.9-flash", object: "model", owned_by: "antigravity", display_name: "Gemini 9.9 Flash" });
+    expect(model).toEqual({
+      id: "gemini-9.9-flash",
+      object: "model",
+      owned_by: "antigravity",
+      display_name: "Gemini 9.9 Flash",
+      architecture: {
+        input_modalities: ["text", "image"],
+        output_modalities: ["text"],
+      },
+    });
   });
 
-  it("exposes gemini-3.1-flash-image image model", async () => {
+  it("exposes gemini-3.1-flash-image image model with image output modality and no reasoning", async () => {
     applyCatalog([
       {
         id: "gemini-3.1-flash-image",
@@ -106,10 +122,14 @@ describe("GET /v1/models", () => {
       headers: auth,
     });
     expect(response.statusCode).toBe(200);
-    const body = response.json() as { data: Array<{ id: string }> };
-    const ids = body.data.map((m) => m.id);
-    expect(ids).toContain("gemini-3.1-flash-image");
-    expect(ids).not.toContain("dall-e-3");
+    const body = response.json() as { data: Array<Record<string, unknown>> };
+    const imgModel = body.data.find((m) => m.id === "gemini-3.1-flash-image");
+    expect(imgModel).toBeDefined();
+    expect(imgModel?.architecture).toEqual({
+      input_modalities: ["text", "image"],
+      output_modalities: ["image"],
+    });
+    expect(imgModel?.reasoning).toBeUndefined();
   });
 
   it("returns an empty list when nothing has been discovered", async () => {
