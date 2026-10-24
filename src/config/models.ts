@@ -233,6 +233,37 @@ export function getMaxOutputTokens(runtimeId: string): number {
   return variant.maxOutputTokens;
 }
 
+/**
+ * Resolves the reasoning effort levels supported by a model.
+ * Returns undefined when thinking is not supported by any variant.
+ */
+export function getSupportedEfforts(model: CatalogModel): string[] | undefined {
+  const supportsThinking = model.variants.some((v) => v.supportsThinking);
+  if (!supportsThinking) return undefined;
+
+  const explicitEfforts = new Set<string>();
+  for (const v of model.variants) {
+    if (v.suffix === "low") explicitEfforts.add("low");
+    if (v.suffix === "medium") explicitEfforts.add("medium");
+    if (v.suffix === "high") explicitEfforts.add("high");
+    if (v.suffix === "extra-high") explicitEfforts.add("xhigh");
+  }
+
+  if (explicitEfforts.size > 1) {
+    const order = ["low", "medium", "high", "xhigh"];
+    return order.filter((e) => explicitEfforts.has(e));
+  }
+
+  const id = model.id.toLowerCase();
+  if (id.startsWith("gemini-")) {
+    return ["low", "medium", "high"];
+  }
+  if (id.includes("opus") || id.startsWith("gpt-5") || id.startsWith("gpt-6")) {
+    return ["low", "medium", "high", "xhigh"];
+  }
+  return ["low", "medium", "high"];
+}
+
 export function resetRegistryForTests(): void {
   registry = new Map<string, CatalogModel>();
 }

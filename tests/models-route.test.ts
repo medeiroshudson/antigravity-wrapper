@@ -82,6 +82,32 @@ describe("GET /v1/models", () => {
     });
   });
 
+  it("advertises only model-specific reasoning efforts (e.g. gemini does not have xhigh)", async () => {
+    applyCatalog(CATALOG);
+    const response = await app.inject({ method: "GET", url: "/v1/models", headers: auth });
+    const models = (response.json() as { data: Array<Record<string, any>> }).data;
+
+    const flash = models.find((m) => m.id === "gemini-3.8-flash");
+    expect(flash?.reasoning).toEqual({
+      supported_efforts: ["low", "medium", "high"],
+    });
+
+    const pro = models.find((m) => m.id === "gemini-2.5-pro");
+    expect(pro?.reasoning).toEqual({
+      supported_efforts: ["low", "medium", "high"],
+    });
+
+    const sonnet = models.find((m) => m.id === "claude-sonnet-4-6");
+    expect(sonnet?.reasoning).toEqual({
+      supported_efforts: ["low", "medium", "high"],
+    });
+
+    const gptOss = models.find((m) => m.id === "gpt-oss-120b");
+    expect(gptOss?.reasoning).toEqual({
+      supported_efforts: ["low", "medium", "high"],
+    });
+  });
+
   it("falls back to the public id for a label the backend did not supply", async () => {
     applyCatalog([{ id: "gemini-3.8-flash-tiered", displayName: "-", maxTokens: 100, maxOutputTokens: 50, supportsThinking: true, thinkingBudget: -1 }]);
     const response = await app.inject({ method: "GET", url: "/v1/models", headers: auth });
