@@ -3,6 +3,7 @@ import {
   applyCatalog,
   getMaxOutputTokens,
   getPublicModels,
+  getSupportedEfforts,
   getThinkingConfig,
   normalizeEffort,
   resetRegistryForTests,
@@ -255,5 +256,45 @@ describe("getMaxOutputTokens", () => {
     expect(getMaxOutputTokens("gpt-oss-120b-medium")).toBe(32_768);
     expect(getMaxOutputTokens("gemini-2.5-pro")).toBe(65_535);
     expect(getMaxOutputTokens("nao-existe")).toBe(64_000);
+  });
+});
+
+describe("getSupportedEfforts", () => {
+  it("returns undefined when no variant supports thinking", () => {
+    applyCatalog([
+      { id: "gemini-3.1-flash-image", displayName: "Image", maxTokens: 100, maxOutputTokens: 50, supportsThinking: false, thinkingBudget: null },
+    ]);
+    const model = getPublicModels()[0]!;
+    expect(getSupportedEfforts(model)).toBeUndefined();
+  });
+
+  it("extracts explicit effort variants when available", () => {
+    applyCatalog(CATALOG);
+    const flash = getPublicModels().find((m) => m.id === "gemini-3.8-flash")!;
+    expect(getSupportedEfforts(flash)).toEqual(["low", "medium", "high"]);
+  });
+
+  it("extracts extra-high as xhigh when present in variants", () => {
+    applyCatalog([
+      { id: "gpt-custom-low", displayName: null, maxTokens: 100, maxOutputTokens: 50, supportsThinking: true, thinkingBudget: 1000 },
+      { id: "gpt-custom-extra-high", displayName: null, maxTokens: 100, maxOutputTokens: 50, supportsThinking: true, thinkingBudget: 4000 },
+    ]);
+    const custom = getPublicModels()[0]!;
+    expect(getSupportedEfforts(custom)).toEqual(["low", "xhigh"]);
+  });
+
+  it("falls back to family capabilities for single-variant thinking models", () => {
+    applyCatalog(CATALOG);
+    const pro = getPublicModels().find((m) => m.id === "gemini-2.5-pro")!;
+    expect(getSupportedEfforts(pro)).toEqual(["low", "medium", "high"]);
+
+    const opus = getPublicModels().find((m) => m.id === "claude-opus-4-6")!;
+    expect(getSupportedEfforts(opus)).toEqual(["low", "medium", "high", "xhigh"]);
+
+    const sonnet = getPublicModels().find((m) => m.id === "claude-sonnet-4-6")!;
+    expect(getSupportedEfforts(sonnet)).toEqual(["low", "medium", "high"]);
+
+    const gptOss = getPublicModels().find((m) => m.id === "gpt-oss-120b")!;
+    expect(getSupportedEfforts(gptOss)).toEqual(["low", "medium", "high"]);
   });
 });

@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { getPublicModels } from "../config/models.js";
+import { getPublicModels, getSupportedEfforts } from "../config/models.js";
 import { toOpenAIErrorBody } from "../lib/openai-format/index.js";
 
 export async function modelsRoutes(app: FastifyInstance): Promise<void> {
@@ -8,7 +8,7 @@ export async function modelsRoutes(app: FastifyInstance): Promise<void> {
       const data = getPublicModels().map((model) => {
         const isImageGen = model.id === "gemini-3.1-flash-image";
         const isVision = /^(gemini-|claude-)/i.test(model.id) || isImageGen;
-        const supportsThinking = model.variants.some((v) => v.supportsThinking);
+        const supportedEfforts = getSupportedEfforts(model);
 
         return {
           id: model.id,
@@ -26,10 +26,10 @@ export async function modelsRoutes(app: FastifyInstance): Promise<void> {
             input_modalities: isVision ? ["text", "image"] : ["text"],
             output_modalities: isImageGen ? ["image"] : ["text"],
           },
-          ...(supportsThinking
+          ...(supportedEfforts
             ? {
                 reasoning: {
-                  supported_efforts: ["low", "medium", "high", "xhigh"],
+                  supported_efforts: supportedEfforts,
                 },
               }
             : {}),
