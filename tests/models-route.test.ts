@@ -68,6 +68,8 @@ describe("GET /v1/models", () => {
       id: "claude-opus-4-6",
       object: "model",
       owned_by: "antigravity",
+      name: "Claude Opus 4.6",
+      normalized_name: "Claude Opus 4.6",
       display_name: "Claude Opus 4.6",
       context_length: 250_000,
       max_model_len: 250_000,
@@ -112,6 +114,8 @@ describe("GET /v1/models", () => {
     applyCatalog([{ id: "gemini-3.8-flash-tiered", displayName: "-", maxTokens: 100, maxOutputTokens: 50, supportsThinking: true, thinkingBudget: -1 }]);
     const response = await app.inject({ method: "GET", url: "/v1/models", headers: auth });
     const model = (response.json() as { data: Array<Record<string, unknown>> }).data[0];
+    expect(model?.name).toBe("gemini-3.8-flash");
+    expect(model?.normalized_name).toBe("gemini-3.8-flash");
     expect(model?.display_name).toBe("gemini-3.8-flash");
   });
 
@@ -123,6 +127,8 @@ describe("GET /v1/models", () => {
       id: "gemini-9.9-flash",
       object: "model",
       owned_by: "antigravity",
+      name: "Gemini 9.9 Flash",
+      normalized_name: "Gemini 9.9 Flash",
       display_name: "Gemini 9.9 Flash",
       architecture: {
         input_modalities: ["text", "image"],
