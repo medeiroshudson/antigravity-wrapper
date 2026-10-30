@@ -127,14 +127,15 @@ export async function accountsRoutes(app: FastifyInstance, deps: RouteDeps = {})
         env: deps.env,
         fetchImpl: deps.fetchImpl,
       });
-      const project = await discoverProjectId(tokens.accessToken, {
-        env: deps.env,
-        fetchImpl: deps.fetchImpl,
-      });
       // Best-effort: without an email the account stays usable (the id serves as the label).
       const email = await getUserEmail(tokens.accessToken, {
         env: deps.env,
         fetchImpl: deps.fetchImpl,
+      });
+      const project = await discoverProjectId(tokens.accessToken, {
+        env: deps.env,
+        fetchImpl: deps.fetchImpl,
+        userEmail: email,
       });
       const account = store.upsertAccount({
         id: `account-${randomBytes(8).toString("hex")}`,

@@ -128,6 +128,91 @@ describe("POST /admin/accounts/complete", () => {
     expect(body.data.map((model) => model.id)).toContain("gemini-3.8-flash");
   });
 
+  it("auto-onboards account through /admin/accounts/complete when project is initially unassigned", async () => {
+    let onboardInvoked = false;
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const href = String(url);
+      if (href.includes("oauth2.googleapis.com/token")) {
+        return new Response(JSON.stringify({ access_token: "at", refresh_token: "rt", expires_in: 3600 }));
+      }
+      if (href.includes("userinfo")) {
+        return new Response(JSON.stringify({ email: "hmedeiros.ai.004@gmail.com" }));
+      }
+      if (href.includes("onboardUser")) {
+        onboardInvoked = true;
+        return new Response(JSON.stringify({ cloudaicompanionProject: "aicode-consumers" }));
+      }
+      if (href.includes("loadCodeAssist")) {
+        return new Response(
+          JSON.stringify({ allowedTiers: [{ id: "free-tier", isDefault: true }] }),
+        );
+      }
+      if (href.includes("fetchAvailableModels")) {
+        return new Response(JSON.stringify({ models: {} }));
+      }
+      return new Response(JSON.stringify({}));
+    }) as unknown as typeof fetch;
+
+    app = buildServer("test-key", { store, env: ENV, fetchImpl, logger: false });
+    const start = await app.inject({ method: "POST", url: "/admin/accounts/start", headers: auth });
+    const { state } = start.json() as { state: string };
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/admin/accounts/complete",
+      headers: auth,
+      payload: { callbackUrl: `http://localhost:51121/oauth-callback?code=xyz&state=${state}` },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(onboardInvoked).toBe(true);
+    const body = response.json() as { account: { email: string; projectId: string } };
+    expect(body.account.email).toBe("hmedeiros.ai.004@gmail.com");
+    expect(body.account.projectId).toBe("aicode-consumers");
+  });
+
+  it("surfaces validationUrl with userEmail parameters when VALIDATION_REQUIRED during complete", async () => {
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const href = String(url);
+      if (href.includes("oauth2.googleapis.com/token")) {
+        return new Response(JSON.stringify({ access_token: "at", refresh_token: "rt", expires_in: 3600 }));
+      }
+      if (href.includes("userinfo")) {
+        return new Response(JSON.stringify({ email: "hmedeiros.ai.004@gmail.com" }));
+      }
+      if (href.includes("loadCodeAssist")) {
+        return new Response(
+          JSON.stringify({
+            ineligibleTiers: [
+              {
+                tierId: "free-tier",
+                reasonCode: "VALIDATION_REQUIRED",
+                reasonMessage: "Terms acceptance required",
+                validationUrl: "https://accounts.google.com/signin/continue?flowName=GlifWebSignIn",
+              },
+            ],
+          }),
+        );
+      }
+      return new Response(JSON.stringify({}));
+    }) as unknown as typeof fetch;
+
+    app = buildServer("test-key", { store, env: ENV, fetchImpl, logger: false });
+    const start = await app.inject({ method: "POST", url: "/admin/accounts/start", headers: auth });
+    const { state } = start.json() as { state: string };
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/admin/accounts/complete",
+      headers: auth,
+      payload: { callbackUrl: `http://localhost:51121/oauth-callback?code=xyz&state=${state}` },
+    });
+    expect(response.statusCode).toBe(400);
+    const body = response.json() as { error: { message: string } };
+    expect(body.error.message).toContain("Terms acceptance required");
+    expect(body.error.message).toContain("authuser=hmedeiros.ai.004%40gmail.com");
+    expect(body.error.message).toContain("login_hint=hmedeiros.ai.004%40gmail.com");
+  });
+
   it("rejects an unknown state", async () => {
     app = buildServer("test-key", { store, env: ENV, logger: false });
     const response = await app.inject({
