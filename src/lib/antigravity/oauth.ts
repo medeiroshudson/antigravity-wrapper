@@ -141,13 +141,69 @@ function extractProjectId(data: unknown): string | undefined {
       return (value as { id: string }).id;
     }
   }
+  if (typeof record.response === "object" && record.response !== null) {
+    return extractProjectId(record.response);
+  }
   return undefined;
+}
+
+export interface AllowedTier {
+  id: string;
+  name?: string;
+  isDefault?: boolean;
+}
+
+export interface IneligibleTier {
+  reasonCode?: string;
+  reasonMessage?: string;
+  tierId?: string;
+  validationUrl?: string;
 }
 
 export interface CodeAssistInfo {
   projectId: string | null;
   paidTierId: string | null;
   paidTierName: string | null;
+  allowedTiers: AllowedTier[];
+  ineligibleTiers: IneligibleTier[];
+}
+
+function extractAllowedTiers(data: Record<string, unknown>): AllowedTier[] {
+  const allowed = data.allowedTiers;
+  if (!Array.isArray(allowed)) return [];
+  const out: AllowedTier[] = [];
+  for (const item of allowed) {
+    if (typeof item === "object" && item !== null) {
+      const rec = item as Record<string, unknown>;
+      const id = rec.id;
+      if (typeof id === "string" && id.length > 0) {
+        out.push({
+          id,
+          name: typeof rec.name === "string" ? rec.name : undefined,
+          isDefault: typeof rec.isDefault === "boolean" ? rec.isDefault : undefined,
+        });
+      }
+    }
+  }
+  return out;
+}
+
+function extractIneligibleTiers(data: Record<string, unknown>): IneligibleTier[] {
+  const ineligible = data.ineligibleTiers;
+  if (!Array.isArray(ineligible)) return [];
+  const out: IneligibleTier[] = [];
+  for (const item of ineligible) {
+    if (typeof item === "object" && item !== null) {
+      const rec = item as Record<string, unknown>;
+      out.push({
+        reasonCode: typeof rec.reasonCode === "string" ? rec.reasonCode : undefined,
+        reasonMessage: typeof rec.reasonMessage === "string" ? rec.reasonMessage : undefined,
+        tierId: typeof rec.tierId === "string" ? rec.tierId : undefined,
+        validationUrl: typeof rec.validationUrl === "string" ? rec.validationUrl : undefined,
+      });
+    }
+  }
+  return out;
 }
 
 function tierField(data: Record<string, unknown>, field: string): string | null {
@@ -194,6 +250,8 @@ export async function loadCodeAssistInfo(
         projectId: extractProjectId(data) ?? null,
         paidTierId: tierField(data, "id"),
         paidTierName: tierField(data, "name"),
+        allowedTiers: extractAllowedTiers(data),
+        ineligibleTiers: extractIneligibleTiers(data),
       };
     } catch {
       // Transport failure: try the next endpoint. This reader never throws.
@@ -202,17 +260,101 @@ export async function loadCodeAssistInfo(
   return null;
 }
 
+export async function onboardUser(
+  accessToken: string,
+  tierId = "free-tier",
+  deps: { env?: NodeJS.ProcessEnv; fetchImpl?: typeof fetch } = {},
+): Promise<{ projectId: string | null }> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    "Content-Type": "application/json",
+    "User-Agent": getUserAgent(deps.env),
+  };
+  const payload = {
+    tierId,
+    metadata: { ideType: "ANTIGRAVITY" },
+  };
+
+  for (const endpoint of endpointCandidates(deps.env)) {
+    try {
+      const response = await fetchImpl(`${endpoint}/v1internal:onboardUser`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(getUpstreamTimeoutMs(deps.env)),
+      });
+      if (!response.ok) continue;
+
+      const data = (await response.json()) as Record<string, unknown>;
+      const projectId = extractProjectId(data);
+      return { projectId: projectId ?? null };
+    } catch {
+      // Transport failure: try next candidate
+    }
+  }
+  return { projectId: null };
+}
+
 export async function discoverProjectId(
   accessToken: string,
-  deps: { env?: NodeJS.ProcessEnv; fetchImpl?: typeof fetch } = {},
+  deps: {
+    env?: NodeJS.ProcessEnv;
+    fetchImpl?: typeof fetch;
+    userEmail?: string;
+    pollIntervalMs?: number;
+    pollAttempts?: number;
+  } = {},
 ): Promise<{ projectId: string; paidTier: string | null; paidTierId: string | null }> {
-  const info = await loadCodeAssistInfo(accessToken, deps);
+  let info = await loadCodeAssistInfo(accessToken, deps);
   if (!info) throw new Error(t("oauth.projectIdDiscoveryFailed", { detail: t("upstream.noEndpoint") }));
-  if (!info.projectId) {
-    throw new Error(t("oauth.loadCodeAssistNoProject"));
+  if (info.projectId) {
+    return { projectId: info.projectId, paidTier: info.paidTierName, paidTierId: info.paidTierId };
   }
-  // `paidTier` stays the name for this release's login response; `paidTierId` is new.
-  return { projectId: info.projectId, paidTier: info.paidTierName, paidTierId: info.paidTierId };
+
+  const validationTier = info.ineligibleTiers.find(
+    (t) => Boolean(t.validationUrl) || t.reasonCode === "VALIDATION_REQUIRED",
+  );
+  if (validationTier?.validationUrl) {
+    let url = validationTier.validationUrl;
+    if (deps.userEmail) {
+      try {
+        const parsed = new URL(url);
+        parsed.searchParams.set("authuser", deps.userEmail);
+        parsed.searchParams.set("login_hint", deps.userEmail);
+        url = parsed.toString();
+      } catch {
+        // ignore invalid url parsing
+      }
+    }
+    const reason = validationTier.reasonMessage || t("oauth.validationRequired", { detail: url });
+    throw new Error(`${reason} (${url})`);
+  }
+
+  const candidateTier =
+    info.paidTierId ??
+    info.allowedTiers.find((t) => t.isDefault)?.id ??
+    info.allowedTiers[0]?.id ??
+    "free-tier";
+
+  const onboardResult = await onboardUser(accessToken, candidateTier, deps);
+  if (onboardResult.projectId) {
+    return { projectId: onboardResult.projectId, paidTier: info.paidTierName, paidTierId: info.paidTierId };
+  }
+
+  const pollAttempts = deps.pollAttempts ?? 3;
+  const pollIntervalMs = deps.pollIntervalMs ?? 1500;
+  for (let attempt = 0; attempt < pollAttempts; attempt++) {
+    if (pollIntervalMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+    }
+    info = await loadCodeAssistInfo(accessToken, deps);
+    if (info?.projectId) {
+      return { projectId: info.projectId, paidTier: info.paidTierName, paidTierId: info.paidTierId };
+    }
+  }
+
+  throw new Error(t("oauth.loadCodeAssistNoProject"));
 }
 
 /**

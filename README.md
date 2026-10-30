@@ -369,6 +369,32 @@ different one. Each `start` mints an independent `state`, so logins can even run
 parallel. The account `id` is randomly drawn at `complete` time, not derived from the
 email.
 
+### Automatic onboarding and account verification
+
+Google assigns companion projects (`cloudaicompanionProject`, typically `aicode-consumers`) only after an account has onboarded into the Cloud Code Assist ecosystem.
+
+1. **Automatic Onboarding (`onboardUser`):**
+   If an account has never run the Antigravity desktop IDE, Google responds to initial project discovery without a project ID. The wrapper detects this, identifies eligible tiers (`free-tier` or paid subscriptions), and calls `/v1internal:onboardUser` in the background. It polls the resulting operation until Google provisions the managed companion project. You do not need to install or run the Antigravity desktop application.
+
+2. **Account Validation and Terms Acceptance (`VALIDATION_REQUIRED`):**
+   When Google requires an account check (such as phone verification, terms acceptance, or robot check), the backend returns `ineligibleTiers` with reason code `VALIDATION_REQUIRED`. The wrapper intercepts this and returns HTTP 400 with the exact continuation link:
+
+   ```json
+   {
+     "error": {
+       "message": "Account validation required: ... (https://accounts.google.com/signin/continue?flowName=GlifWebSignIn&authuser=user%40gmail.com&login_hint=user%40gmail.com)",
+       "type": "invalid_request_error",
+       "param": null
+     }
+   }
+   ```
+
+   **To unblock the account:**
+   - Copy the URL from the error message.
+   - Open it in your browser where that Google account is logged in. The URL includes `authuser` and `login_hint` to target the right profile.
+   - Complete Google's prompt (accept terms or finish verification).
+   - Re-run the OAuth login flow (`/admin/accounts/start` and `/admin/accounts/complete`).
+
 ### Error responses from this flow
 
 | Response | Meaning |
@@ -378,6 +404,8 @@ email.
 | `400` `callbackUrl is not a valid URL` | Not parseable as a URL — usually a bare query string instead of the full URL |
 | `400` `callbackUrl is missing code or state` | URL parsed, but one of the two query parameters is absent |
 | `400` `state is unknown or expired; restart the login` | The `state` was already consumed, never existed, or passed its 5-minute TTL |
+| `400` + "Account validation required: ... (https://...)" | Google requires terms acceptance or verification. Open the URL in your browser, complete it, and retry. |
+| `400` `loadCodeAssist returned no projectId` | Automatic onboarding completed but Google did not assign a companion project to this account tier |
 
 ---
 
