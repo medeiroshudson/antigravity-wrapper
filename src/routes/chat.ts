@@ -140,6 +140,26 @@ function mapTurnError(
       status,
     ) as { status: number; body: { error: unknown } };
   }
+  if (
+    error instanceof AllAccountsFailedError &&
+    error.failures.length > 0 &&
+    error.failures.every((failure) => failure.kind === "account_blocked")
+  ) {
+    // Every account is suspended upstream. That is neither the model's fault nor a
+    // transient fault: name the appeal, keep the status final (403, not a 5xx the client
+    // retries) and a code distinct from the generic `antigravity_error`.
+    const appeal = error.failures.find((failure) => failure.appealUrl)?.appealUrl ?? null;
+    return toOpenAIErrorBody(
+      new Error(
+        t(appeal === null ? "chat.poolAllBlockedNoAppeal" : "chat.poolAllBlocked", {
+          accounts: error.failures.length,
+          appeal: appeal ?? "",
+        }),
+      ),
+      403,
+      { code: "accounts_blocked" },
+    ) as { status: number; body: { error: unknown } };
+  }
   if (error instanceof AllAccountsFailedError && (isPoolRateLimited(error.failures) || error.failures.length === 0)) {
     // The pool is drained by quota, or empty (every account in cooldown). A retryable
     // status kept the client re-issuing — measured at ~0.5s — so the loop never ended. A

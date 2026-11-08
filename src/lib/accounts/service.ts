@@ -90,6 +90,7 @@ export class AccountService {
   /**
    * Applies the effect of a failure to the account state (spec §11).
    * A license 403 is a wrapper configuration error, not the account's: it does not change state.
+   * A TOS block is the opposite case: it is the account's alone, so it leaves the rotation.
    */
   applyFailure(id: string, error: UpstreamError): void {
     const now = this.now();
@@ -108,6 +109,17 @@ export class AccountService {
         return;
       case "auth":
         this.deps.store.setStatus(id, "invalid", { lastError: error.message });
+        return;
+      case "account_blocked":
+        // The ban belongs to this account, so keep it out of the rotation and record why
+        // (with the appeal form the backend named). Re-onboarding the account clears the
+        // status, which is the way back once Google reinstates it.
+        this.deps.store.setStatus(id, "invalid", {
+          lastError:
+            error.appealUrl === null
+              ? t("account.tosBlockedNoAppeal")
+              : t("account.tosBlocked", { appeal: error.appealUrl }),
+        });
         return;
       default:
         // client_error, model_not_found, server_error, license: no state change.

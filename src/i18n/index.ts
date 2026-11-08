@@ -31,6 +31,10 @@ const enUS = {
   "account.refreshFailed": "failed to renew the access token",
   "account.validationRequired":
     "Account requires browser verification (VALIDATION_REQUIRED); retrying will not help.",
+  "account.tosBlocked":
+    "Upstream blocked this account for a Terms of Service violation (403 TOS_VIOLATION). Appeal: {appeal}. It stays out of the pool until Google reinstates it and the account is re-onboarded.",
+  "account.tosBlockedNoAppeal":
+    "Upstream blocked this account for a Terms of Service violation (403 TOS_VIOLATION). It stays out of the pool until Google reinstates it and the account is re-onboarded.",
   "account.noEligible":
     "No eligible account in the pool: register or re-enable one under /admin/accounts.",
   "account.allFailed": "All accounts failed: {failures}",
@@ -56,6 +60,10 @@ const enUS = {
     "Model '{model}' is unavailable: the account pool is out of quota for it. It clears in ~{reset}. Try another model.",
   "chat.poolEmptyNoReset":
     "Model '{model}' is unavailable: no account in the pool can serve it. Try another model.",
+  "chat.poolAllBlocked":
+    "All {accounts} account(s) in the pool are blocked upstream for a Terms of Service violation (403 TOS_VIOLATION). Appeal at {appeal}, then re-onboard the account or register a new one under /admin/accounts.",
+  "chat.poolAllBlockedNoAppeal":
+    "All {accounts} account(s) in the pool are blocked upstream for a Terms of Service violation (403 TOS_VIOLATION). Register a new account under /admin/accounts.",
   "chat.messagesEmpty": "toContents expects a non-empty list of messages",
   "chat.accountWithoutProjectId": "account has no projectId",
   "chat.streamWithoutFinishReason": "stream ended without finishReason",

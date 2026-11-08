@@ -6,6 +6,7 @@ export type UpstreamFailureKind =
   | "transient_rate_limit"
   | "auth"
   | "validation_required"
+  | "account_blocked"
   | "license"
   | "model_not_found"
   | "client_error"
@@ -18,6 +19,8 @@ export class UpstreamError extends Error {
     readonly status: number,
     message: string,
     readonly retryAfterMs: number | null = null,
+    /** Where the account owner appeals a block, when the backend names it. */
+    readonly appealUrl: string | null = null,
   ) {
     super(redact(message).slice(0, 500));
     Object.setPrototypeOf(this, UpstreamError.prototype);
@@ -46,8 +49,11 @@ export class ClientDisconnectedError extends Error {
  * missing model, a rejected request and a wrong client fingerprint fail identically
  * everywhere, so retrying them only spends endpoints and buries the cause.
  *
- * `auth` and `validation_required` are deliberately absent: each account has its own token
- * and its own verification state, so another account is a real remedy for those.
+ * `auth`, `validation_required` and `account_blocked` are deliberately absent: each account
+ * has its own token, its own verification state and its own Terms-of-Service standing, so
+ * another account is a real remedy for those. Measured 2026-11-05: a `403 TOS_VIOLATION`
+ * answered for eight accounts of the pool while two fresh ones served 200 in the same
+ * process, under the same client id and User-Agent.
  */
 const DEFINITIVE_KINDS: ReadonlySet<UpstreamFailureKind> = new Set([
   "model_not_found",
@@ -151,6 +157,35 @@ function parseStructuredReset(body: string): number | null {
   return null;
 }
 
+/**
+ * The block Google applies to one account, not to a request: a 403 whose `ErrorInfo`
+ * carries `reason: "TOS_VIOLATION"`, with the appeal form in `metadata.appeal_url`.
+ * The structured reason is the durable signal; the message is only a fallback, because
+ * the same wording could accompany a request-level refusal.
+ */
+function parseAccountBlock(body: string): { appealUrl: string | null } | null {
+  let parsed: { error?: { details?: unknown } };
+  try {
+    parsed = JSON.parse(body) as typeof parsed;
+  } catch {
+    return null;
+  }
+  const details = parsed.error?.details;
+  if (!Array.isArray(details)) return null;
+  for (const detail of details) {
+    if (typeof detail !== "object" || detail === null) continue;
+    const record = detail as Record<string, unknown>;
+    if (record.reason !== "TOS_VIOLATION") continue;
+    const metadata =
+      typeof record.metadata === "object" && record.metadata !== null
+        ? (record.metadata as Record<string, unknown>)
+        : {};
+    const appealUrl = typeof metadata.appeal_url === "string" ? metadata.appeal_url : null;
+    return { appealUrl };
+  }
+  return null;
+}
+
 export function classifyUpstream(status: number, body: string): UpstreamError {
   const text = messageOf(body);
 
@@ -173,6 +208,12 @@ export function classifyUpstream(status: number, body: string): UpstreamError {
   }
   if (status === 401) return new UpstreamError("auth", status, text);
   if (status === 403) {
+    // Order matters: a blocked account still carries a message the other branches could
+    // match, and only this one leaves the account out of the pool.
+    const block = parseAccountBlock(body);
+    if (block !== null || /violation of terms of service/i.test(text)) {
+      return new UpstreamError("account_blocked", status, text, null, block?.appealUrl ?? null);
+    }
     if (/VALIDATION_REQUIRED/i.test(body)) return new UpstreamError("validation_required", status, text);
     if (/valid license of this product/i.test(text)) return new UpstreamError("license", status, text);
     return new UpstreamError("client_error", status, text);

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { classifyUpstream, isDefinitive } from "../src/lib/antigravity/errors.js";
+import { TOS_APPEAL_URL, TOS_VIOLATION_BODY } from "./fixtures/tos.js";
 
 describe("classifyUpstream", () => {
   it("treats a 429 with a reset hint as a quota wall, extracting retryAfterMs", () => {
@@ -42,6 +43,30 @@ describe("classifyUpstream", () => {
   it("recognizes the 403 license error (missing fingerprint)", () => {
     const err = classifyUpstream(403, '{"error":{"message":"You do not have a valid license of this product."}}');
     expect(err.kind).toBe("license");
+  });
+
+  it("classifies the 403 TOS_VIOLATION as an account block and keeps the appeal url", () => {
+    // Measured 2026-11-05: eight accounts of the pool answered this while two fresh ones
+    // in the same process served 200. Treating it as a request verdict is what left the
+    // blocked accounts active and in rotation.
+    const err = classifyUpstream(403, TOS_VIOLATION_BODY);
+    expect(err.kind).toBe("account_blocked");
+    expect(err.appealUrl).toBe(TOS_APPEAL_URL);
+    expect(isDefinitive(err.kind)).toBe(false);
+  });
+
+  it("recognizes a TOS block from the message when the structured reason is absent", () => {
+    const body =
+      '{"error":{"message":"This service has been disabled in this account for violation of Terms of Service."}}';
+    const err = classifyUpstream(403, body);
+    expect(err.kind).toBe("account_blocked");
+    expect(err.appealUrl).toBeNull();
+  });
+
+  it("keeps a 403 without the TOS reason a request-level client error", () => {
+    expect(classifyUpstream(403, '{"error":{"message":"Permission denied on the project"}}').kind).toBe(
+      "client_error",
+    );
   });
 
   it("classifies 400 as a client error and 404 as a missing model", () => {
@@ -122,6 +147,7 @@ describe("isDefinitive", () => {
     // a real remedy and must keep working.
     expect(isDefinitive("auth")).toBe(false);
     expect(isDefinitive("validation_required")).toBe(false);
+    expect(isDefinitive("account_blocked")).toBe(false);
     expect(isDefinitive("quota")).toBe(false);
     expect(isDefinitive("transient_rate_limit")).toBe(false);
     expect(isDefinitive("server_error")).toBe(false);

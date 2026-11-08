@@ -4,6 +4,7 @@ import { AllAccountsFailedError, TurnRunner } from "../src/lib/chat/turn.js";
 import type { AccountService } from "../src/lib/accounts/service.js";
 import type { AccountSnapshot } from "../src/lib/accounts/store.js";
 import { captureLogger } from "./fixtures/logger.js";
+import { TOS_VIOLATION_BODY } from "./fixtures/tos.js";
 
 function snapshot(id: string): AccountSnapshot {
   return {
@@ -110,6 +111,29 @@ describe("TurnRunner", () => {
       prompt_tokens_details: { cached_tokens: 0 },
       completion_tokens_details: { reasoning_tokens: 0 },
     });
+  });
+
+  it("records an upstream TOS block against the account and fails over to the next one", async () => {
+    // A blocked account must leave the rotation: while the block was classified as a
+    // request verdict, the account stayed `active` and every later turn spent a failover
+    // slot on it again.
+    const calls = { n: 0 };
+    const fetchImpl = vi.fn(async () => {
+      calls.n += 1;
+      return calls.n === 1 ? new Response(TOS_VIOLATION_BODY, { status: 403 }) : sse(TEXT_SSE);
+    }) as unknown as typeof fetch;
+    const accounts = service([snapshot("a1"), snapshot("a2")]);
+    const applyFailure = accounts.applyFailure as unknown as ReturnType<typeof vi.fn>;
+    const runner = new TurnRunner({ accounts, fetchImpl });
+
+    const { accountId } = await runner.run(BASE);
+
+    expect(accountId).toBe("a2");
+    expect(applyFailure).toHaveBeenCalledTimes(1);
+    const [failedId, failure] = applyFailure.mock.calls[0] as [string, { kind: string; appealUrl: string }];
+    expect(failedId).toBe("a1");
+    expect(failure.kind).toBe("account_blocked");
+    expect(failure.appealUrl).toContain("forms.gle");
   });
 
   it("computes gross prompt_tokens and token details in usage", async () => {

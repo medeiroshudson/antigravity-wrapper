@@ -6,6 +6,7 @@ import { ImageService } from "../lib/images/service.js";
 import { ClientDisconnectedError, isPoolRateLimited, UpstreamError } from "../lib/antigravity/errors.js";
 import { AllAccountsFailedError } from "../lib/chat/turn.js";
 import { toOpenAIErrorBody } from "../lib/openai-format/index.js";
+import { t } from "../i18n/index.js";
 import { wireClientDisconnect } from "./chat.js";
 
 export const VALID_IMAGE_MODELS = new Set(["gemini-3.1-flash-image"]);
@@ -187,6 +188,36 @@ export async function imagesRoutes(
             elapsedMs: Date.now() - requestStart,
           },
           "image generation upstream error",
+        );
+        reply.status(mapped.status).send(mapped.body);
+        return;
+      }
+
+      if (
+        error instanceof AllAccountsFailedError &&
+        error.failures.length > 0 &&
+        error.failures.every((failure) => failure.kind === "account_blocked")
+      ) {
+        // Same verdict as the chat route: final, named and actionable, not a retryable 503.
+        const appeal = error.failures.find((failure) => failure.appealUrl)?.appealUrl ?? null;
+        const mapped = toOpenAIErrorBody(
+          new Error(
+            t(appeal === null ? "chat.poolAllBlockedNoAppeal" : "chat.poolAllBlocked", {
+              accounts: error.failures.length,
+              appeal: appeal ?? "",
+            }),
+          ),
+          403,
+          { code: "accounts_blocked" },
+        );
+        log.warn(
+          {
+            model,
+            status: mapped.status,
+            failures: error.failures.length,
+            elapsedMs: Date.now() - requestStart,
+          },
+          "all accounts blocked for image generation",
         );
         reply.status(mapped.status).send(mapped.body);
         return;

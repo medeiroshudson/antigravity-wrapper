@@ -86,7 +86,13 @@ export class ImageService {
       this.logger.warn({ warning, size: options?.size }, "image size warning");
     }
 
-    const failures: Array<{ accountId: string; kind: string; message: string; retryAfterMs?: number | null }> = [];
+    const failures: Array<{
+      accountId: string;
+      kind: string;
+      message: string;
+      retryAfterMs?: number | null;
+      appealUrl?: string | null;
+    }> = [];
 
     for (const candidate of candidates) {
       if (options?.signal?.aborted) {
@@ -124,6 +130,7 @@ export class ImageService {
             kind: error.kind,
             message: error.message,
             retryAfterMs: error.retryAfterMs,
+            appealUrl: error.appealUrl,
           });
           continue;
         }
@@ -230,6 +237,8 @@ export class ImageService {
         response.status >= 500 ||
         error.kind === "auth" ||
         error.kind === "validation_required" ||
+        // An account block travels with the account, not with the channel.
+        error.kind === "account_blocked" ||
         isDefinitive(error.kind)
       ) {
         break;

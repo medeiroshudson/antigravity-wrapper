@@ -58,7 +58,14 @@ export interface TurnOutcome {
 export class AllAccountsFailedError extends Error {
   override name = "AllAccountsFailedError";
   constructor(
-    readonly failures: Array<{ accountId: string; kind: string; message: string; retryAfterMs?: number | null }>,
+    readonly failures: Array<{
+      accountId: string;
+      kind: string;
+      message: string;
+      retryAfterMs?: number | null;
+      /** The appeal form a TOS block names, when the backend provides one. */
+      appealUrl?: string | null;
+    }>,
   ) {
     super(
       failures.length === 0
@@ -127,7 +134,13 @@ export class TurnRunner {
     const candidates = await this.deps.accounts.orderFor(input.runtimeModel);
     const limit = getMaxFailoverAttempts(this.deps.env);
     const backoffMs = getTransientRetryBackoffMs(this.deps.env);
-    const failures: Array<{ accountId: string; kind: string; message: string; retryAfterMs?: number | null }> = [];
+    const failures: Array<{
+      accountId: string;
+      kind: string;
+      message: string;
+      retryAfterMs?: number | null;
+      appealUrl?: string | null;
+    }> = [];
     this.logger.debug(
       { runtimeModel: input.runtimeModel, candidates: candidates.map((c) => c.id), limit },
       "turn candidates",
@@ -202,7 +215,9 @@ export class TurnRunner {
               action:
                 error.kind === "quota"
                   ? "cooldown"
-                  : error.kind === "auth" || error.kind === "validation_required"
+                  : error.kind === "auth" ||
+                      error.kind === "validation_required" ||
+                      error.kind === "account_blocked"
                     ? "invalid"
                     : "none",
             },
@@ -218,6 +233,7 @@ export class TurnRunner {
             kind: error.kind,
             message: error.message,
             retryAfterMs: error.retryAfterMs,
+            appealUrl: error.appealUrl,
           });
           break;
         }

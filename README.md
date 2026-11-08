@@ -395,6 +395,43 @@ Google assigns companion projects (`cloudaicompanionProject`, typically `aicode-
    - Complete Google's prompt (accept terms or finish verification).
    - Re-run the OAuth login flow (`/admin/accounts/start` and `/admin/accounts/complete`).
 
+3. **Account blocked for a Terms of Service violation (`TOS_VIOLATION`):**
+   Google suspends the account itself, and answers every generation request with `403 PERMISSION_DENIED`, `ErrorInfo.reason: "TOS_VIOLATION"` and an `appeal_url` in the metadata:
+
+   ```json
+   {
+     "error": {
+       "code": 403,
+       "message": "This service has been disabled in this account for violation of Terms of Service. Please submit an appeal to continue using this product.",
+       "status": "PERMISSION_DENIED",
+       "details": [
+         {
+           "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+           "reason": "TOS_VIOLATION",
+           "domain": "cloudcode-pa.googleapis.com",
+           "metadata": { "appeal_url": "https://forms.gle/hGzM9MEUv2azZsrb9" }
+         }
+       ]
+     }
+   }
+   ```
+
+   This is an **account** verdict, not a request one. Measured on 2026-11-05: eight accounts of
+   one pool answered it while two fresh accounts, in the same process, under the same client id
+   and User-Agent, served `200` in the same minute. The wrapper therefore:
+
+   - classifies it as `account_blocked`, which is **not** definitive — another account is the remedy;
+   - stops probing the remaining endpoints for that request (the ban is not channel-specific);
+   - marks the account `invalid` and records the appeal form in `lastError`, so it leaves the rotation instead of burning a failover slot on every later turn;
+   - answers `403` with code `accounts_blocked` and the appeal link when **every** account of the pool is blocked, instead of blaming the requested model.
+
+   **To unblock:** submit the appeal at the `appeal_url`, and once Google reinstates the account re-run the OAuth login flow for it — re-onboarding resets the status to `active`.
+
+   The quota summary keeps working while the account is blocked (the block applies to
+   generation only), so `/admin/accounts/quota` still reads a healthy-looking quota for an
+   account that cannot serve a single request. `status` and `lastError` are the fields that
+   tell the two apart.
+
 ### Error responses from this flow
 
 | Response | Meaning |

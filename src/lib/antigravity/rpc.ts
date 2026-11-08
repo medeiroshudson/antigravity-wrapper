@@ -100,6 +100,9 @@ export async function streamGenerate(
     // spending the client's patience for nothing. The account-level retry and the failover
     // to another account are the recovery paths.
     if (error.kind === "quota" || error.kind === "transient_rate_limit") break;
+    // An account block travels with the account, not with the channel: every endpoint
+    // answers it identically, so one probe is enough and the pool must fail over.
+    if (error.kind === "account_blocked") break;
     // A definitive failure is not repaired by another channel: stop and report it.
     if (isDefinitive(error.kind) || !RETRYABLE_STATUS.has(response.status)) break;
   }

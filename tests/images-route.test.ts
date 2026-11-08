@@ -1,6 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildServer } from "../src/server.js";
 import { AccountStore } from "../src/lib/accounts/store.js";
+import { TOS_VIOLATION_BODY } from "./fixtures/tos.js";
 
 describe("POST /v1/images/generations", () => {
   let store: AccountStore;
@@ -47,6 +48,22 @@ describe("POST /v1/images/generations", () => {
     });
     expect(res.statusCode).toBe(400);
     expect(res.json().error.message).toMatch(/prompt/i);
+  });
+
+  it("answers 403 accounts_blocked when the upstream blocked the only account", async () => {
+    // The image route shares the pool, so a block there must read the same way it does on
+    // chat: final and named, not a retryable 503.
+    const blocked = vi.fn(async () => new Response(TOS_VIOLATION_BODY, { status: 403 })) as unknown as typeof fetch;
+    const server = buildTestServer(blocked);
+    const res = await server.inject({
+      method: "POST",
+      url: "/v1/images/generations",
+      headers: { authorization: "Bearer test-key" },
+      payload: { prompt: "a cat" },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe("accounts_blocked");
+    expect(store.getAccount("acc-1")?.status).toBe("invalid");
   });
 
   it("rejects request with prompt exceeding 4000 characters with 400", async () => {

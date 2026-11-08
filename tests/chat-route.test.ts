@@ -5,6 +5,7 @@ import { buildServer } from "../src/server.js";
 import { AccountStore } from "../src/lib/accounts/store.js";
 import { applyCatalog, resetRegistryForTests } from "../src/config/models.js";
 import { CATALOG } from "./fixtures/catalog.js";
+import { TOS_APPEAL_URL, TOS_VIOLATION_BODY } from "./fixtures/tos.js";
 
 const auth = { authorization: "Bearer test-key" };
 const ENV = { ANTIGRAVITY_CLIENT_ID: "c", ANTIGRAVITY_CLIENT_SECRET: "s" };
@@ -169,6 +170,25 @@ describe("POST /v1/chat/completions", () => {
     });
     expect(response.statusCode).toBe(400);
     expect(response.json().error.message).toMatch(/no account in the pool can serve it/i);
+  });
+
+  it("answers 403 accounts_blocked, naming the appeal, when every account is blocked upstream", async () => {
+    const blocked = vi.fn(async () => new Response(TOS_VIOLATION_BODY, { status: 403 })) as unknown as typeof fetch;
+    app = buildServer("test-key", { store, env: ENV, fetchImpl: blocked, logger: false });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: { model: "gemini-3.8-flash", messages: [{ role: "user", content: "oi" }] },
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json().error).toMatchObject({ code: "accounts_blocked" });
+    expect(response.json().error.message).toMatch(/blocked upstream/i);
+    expect(response.json().error.message).toContain(TOS_APPEAL_URL);
+    // The block is the account's, so the account leaves the rotation instead of being
+    // retried on every turn.
+    expect(store.getAccount("a1")?.status).toBe("invalid");
   });
 
   it("returns 400 when messages is empty", async () => {

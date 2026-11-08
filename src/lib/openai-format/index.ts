@@ -278,6 +278,11 @@ export const SSE_DONE = "data: [DONE]\n\n";
 export function toOpenAIErrorBody(
   err: unknown,
   status = 500,
+  /**
+   * Overrides the derived `code` for a caller that knows the failure better than the
+   * status mapping does (a blocked pool is a 403, but `antigravity_error` would hide it).
+   */
+  opts: { code?: string } = {},
 ): { status: number; body: { error: OpenAIErrorBody } } {
   const message = err instanceof Error ? err.message : String(err);
   const detected = detectStatus(err);
@@ -298,6 +303,8 @@ export function toOpenAIErrorBody(
         : finalStatus === 429
           ? { message, type: "rate_limit_error", code: "rate_limit_exceeded", param: null }
           : { message, type: "server_error", code: "antigravity_error", param: null };
+
+  if (opts.code !== undefined) error.code = opts.code;
 
   return { status: finalStatus, body: { error } };
 }
