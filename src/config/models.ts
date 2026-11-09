@@ -35,6 +35,10 @@ export interface CatalogEntry {
   maxOutputTokens: number | null;
   supportsThinking: boolean;
   thinkingBudget: number | null;
+  /** The backend's model enum, the value the client puts in `labels.model_enum`. */
+  backendEnum?: string | null;
+  /** The backend's own thinking level for the model, when it reports one. */
+  thinkingLevel?: number | null;
 }
 
 export interface CatalogVariant {
@@ -45,6 +49,8 @@ export interface CatalogVariant {
   maxOutputTokens: number;
   supportsThinking: boolean;
   thinkingBudget: number;
+  backendEnum: string | null;
+  thinkingLevel: number | null;
 }
 
 export interface CatalogModel {
@@ -141,6 +147,8 @@ export function applyCatalog(entries: readonly CatalogEntry[]): void {
       maxOutputTokens: entry.maxOutputTokens ?? 0,
       supportsThinking: entry.supportsThinking,
       thinkingBudget: entry.thinkingBudget ?? 0,
+      backendEnum: entry.backendEnum ?? null,
+      thinkingLevel: entry.thinkingLevel ?? null,
     };
 
     const existing = registry.get(base);
@@ -216,15 +224,47 @@ export function resolveRuntimeModel(publicId: string, effort: ReasoningEffort): 
   return (chosen ?? variants[0])?.runtimeId ?? publicId;
 }
 
-/** The catalog's own budget for the model, with `off` still forcing thinking away. */
-export function getThinkingConfig(
-  runtimeId: string,
-  effort: ReasoningEffort,
-): { includeThoughts: boolean; thinkingBudget: number } {
-  if (effort === "off") return { includeThoughts: false, thinkingBudget: 0 };
+/**
+ * The thinking levels the backend accepts, in its own spelling (protojson drops the
+ * `THINKING_LEVEL_` prefix, so the wire value is `HIGH`, not `THINKING_LEVEL_HIGH`).
+ */
+export type ThinkingLevel = "MINIMAL" | "LOW" | "MEDIUM" | "HIGH" | "MODEL_DEFAULT";
+
+/**
+ * Variant degree -> wire level. Measured 2026-11-09: the installed client sends
+ * `thinkingLevel: "HIGH"` for `gemini-3.8-flash-high`, whose variant degree is 4 here. The
+ * catalog's numeric `thinkingLevel` is *not* the enum ordinal (that model reports 3 while
+ * the client sends HIGH), so the degree ladder is what maps, and an unknown degree falls
+ * back to `MODEL_DEFAULT` rather than guessing.
+ */
+const LEVEL_BY_DEGREE: Record<number, ThinkingLevel> = {
+  0: "MINIMAL",
+  1: "LOW",
+  3: "MEDIUM",
+  4: "HIGH",
+};
+
+export interface ThinkingConfig {
+  includeThoughts: boolean;
+  thinkingLevel?: ThinkingLevel;
+  /** Only for a variant whose degree has no level mapping, and for the off switch. */
+  thinkingBudget?: number;
+}
+
+/** The catalog's own thinking setting, with `off` still forcing thinking away. */
+export function getThinkingConfig(runtimeId: string, effort: ReasoningEffort): ThinkingConfig {
+  if (effort === "off") return { includeThoughts: false };
   const variant = findVariant(runtimeId);
-  if (!variant || !variant.supportsThinking) return { includeThoughts: false, thinkingBudget: 0 };
-  return { includeThoughts: true, thinkingBudget: variant.thinkingBudget };
+  if (!variant || !variant.supportsThinking) return { includeThoughts: false };
+  const level = LEVEL_BY_DEGREE[variant.degree];
+  return level === undefined
+    ? { includeThoughts: true, thinkingBudget: variant.thinkingBudget }
+    : { includeThoughts: true, thinkingLevel: level };
+}
+
+/** The backend's model enum for a runtime id, as `labels.model_enum` expects it. */
+export function getModelEnum(runtimeId: string): string | null {
+  return findVariant(runtimeId)?.backendEnum ?? null;
 }
 
 export function getMaxOutputTokens(runtimeId: string): number {

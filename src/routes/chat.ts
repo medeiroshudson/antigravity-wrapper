@@ -13,6 +13,7 @@ import type { AccountStore } from "../lib/accounts/store.js";
 import { AccountService } from "../lib/accounts/service.js";
 import { ClientDisconnectedError, isDefinitive, isPoolRateLimited, UpstreamError } from "../lib/antigravity/errors.js";
 import { AllAccountsFailedError, TurnRunner } from "../lib/chat/turn.js";
+import { getConversationRegistry } from "../lib/chat/identity.js";
 import { toResetPhrase } from "../lib/format/datetime.js";
 import { toContents, type ChatMessage } from "../lib/chat/compose.js";
 import {
@@ -357,7 +358,15 @@ export async function chatRoutes(
     const accounts = deps.store
       ? new AccountService({ store: deps.store, env: deps.env, fetchImpl: deps.fetchImpl, logger: log })
       : getAccountService(deps.env, log);
-    const runner = new TurnRunner({ accounts, env: deps.env, fetchImpl: deps.fetchImpl, logger: log });
+    // One registry per server: a conversation must keep its cascade id and its account
+    // across requests, and this handler builds a runner per request.
+    const runner = new TurnRunner({
+      accounts,
+      env: deps.env,
+      fetchImpl: deps.fetchImpl,
+      logger: log,
+      identities: getConversationRegistry(),
+    });
     const turnInput = {
       runtimeModel,
       contents,

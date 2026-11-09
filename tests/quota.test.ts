@@ -270,6 +270,8 @@ describe("fetchAvailableModels", () => {
           maxOutputTokens: 65_536,
           supportsThinking: true,
           thinkingBudget: 1000,
+          model: "MODEL_PLACEHOLDER_M320",
+          thinkingLevel: 1,
           quotaInfo: { remainingFraction: 0.8, resetTime: "2026-10-19T20:39:33Z" },
         },
         chat_1: { quotaInfo: { remainingFraction: 1 } },
@@ -289,6 +291,8 @@ describe("fetchAvailableModels", () => {
       maxOutputTokens: 65_536,
       supportsThinking: true,
       thinkingBudget: 1000,
+      backendEnum: "MODEL_PLACEHOLDER_M320",
+      thinkingLevel: 1,
     });
   });
 
@@ -305,6 +309,8 @@ describe("fetchAvailableModels", () => {
       maxOutputTokens: null,
       supportsThinking: false,
       thinkingBudget: null,
+      backendEnum: null,
+      thinkingLevel: null,
     });
   });
 

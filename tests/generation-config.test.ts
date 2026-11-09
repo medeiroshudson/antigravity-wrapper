@@ -4,7 +4,7 @@ import { isGenerationConfigMapEnabled } from "../src/config/index.js";
 
 describe("buildEnvelope generationConfig mapping", () => {
   it("maps temperature, topP, topK, and stopSequences into generationConfig", () => {
-    const identity = newRequestIdentity("gemini-2.5-flash");
+    const identity = newRequestIdentity("gemini-2.5-flash", { cascadeId: "c", trajectoryId: "t", sessionId: "1", step: 1, requestIndex: 0, lastExecutionId: null });
     const envelope = buildEnvelope({
       projectId: "proj-1",
       runtimeModel: "gemini-2.5-flash",
@@ -30,7 +30,7 @@ describe("buildEnvelope generationConfig mapping", () => {
   });
 
   it("omits empty stopSequences array from generationConfig", () => {
-    const identity = newRequestIdentity("gemini-2.5-flash");
+    const identity = newRequestIdentity("gemini-2.5-flash", { cascadeId: "c", trajectoryId: "t", sessionId: "1", step: 1, requestIndex: 0, lastExecutionId: null });
     const envelope = buildEnvelope({
       projectId: "proj-1",
       runtimeModel: "gemini-2.5-flash",
@@ -48,7 +48,7 @@ describe("buildEnvelope generationConfig mapping", () => {
   });
 
   it("maps responseMimeType and responseSchema into generationConfig", () => {
-    const identity = newRequestIdentity("gemini-2.5-flash");
+    const identity = newRequestIdentity("gemini-2.5-flash", { cascadeId: "c", trajectoryId: "t", sessionId: "1", step: 1, requestIndex: 0, lastExecutionId: null });
     const schema = { type: "object", properties: { key: { type: "string" } } };
     const envelope = buildEnvelope({
       projectId: "proj-1",

@@ -5,6 +5,7 @@ import type { AccountService } from "../src/lib/accounts/service.js";
 import type { AccountSnapshot } from "../src/lib/accounts/store.js";
 import { captureLogger } from "./fixtures/logger.js";
 import { TOS_VIOLATION_BODY } from "./fixtures/tos.js";
+import { ConversationRegistry } from "../src/lib/chat/identity.js";
 
 function snapshot(id: string): AccountSnapshot {
   return {
@@ -111,6 +112,71 @@ describe("TurnRunner", () => {
       prompt_tokens_details: { cached_tokens: 0 },
       completion_tokens_details: { reasoning_tokens: 0 },
     });
+  });
+
+  it("keeps the cascade id and the serving account across turns of one conversation", async () => {
+    // Measured 2026-11-09: one conversation keeps `cascade_id`/`trajectory_id`/`sessionId`
+    // and only advances the step; a pool that rotates accounts mid-conversation makes one
+    // cascade appear from several Google accounts.
+    const bodies: Array<Record<string, any>> = [];
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, any>);
+      return sse(TEXT_SSE);
+    }) as unknown as typeof fetch;
+
+    // The second turn is ordered the other way round, as the pool's balancing would do.
+    let order = [snapshot("a1"), snapshot("a2")];
+    const accounts = {
+      orderFor: vi.fn(async () => order),
+      ensureFresh: vi.fn(async (a: AccountSnapshot) => a),
+      markUsed: vi.fn(),
+      applyFailure: vi.fn(),
+      refreshQuota: vi.fn(async () => undefined),
+    } as unknown as AccountService;
+    const runner = new TurnRunner({ accounts, fetchImpl, identities: new ConversationRegistry() });
+
+    const first = await runner.run(BASE);
+    order = [snapshot("a2"), snapshot("a1")];
+    const second = await runner.run(BASE);
+
+    expect(first.accountId).toBe("a1");
+    expect(second.accountId).toBe("a1");
+
+    const labelsOf = (body: Record<string, any>): Record<string, string> => body.request.labels;
+    expect(labelsOf(bodies[1]!).cascade_id).toBe(labelsOf(bodies[0]!).cascade_id);
+    expect(labelsOf(bodies[1]!).trajectory_id).toBe(labelsOf(bodies[0]!).trajectory_id);
+    expect(labelsOf(bodies[1]!).root_cascade_id).toBe(labelsOf(bodies[0]!).cascade_id);
+    expect(bodies[0]!.request.sessionId).toBe(bodies[1]!.request.sessionId);
+    expect(labelsOf(bodies[0]!).last_step_index).toBe("0");
+    expect(labelsOf(bodies[1]!).last_step_index).toBe("1");
+    // Captured on the client's second turn: a UUID naming the previous execution.
+    expect(labelsOf(bodies[0]!).last_execution_id).toBeUndefined();
+    expect(labelsOf(bodies[1]!).last_execution_id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(labelsOf(bodies[1]!).request_id).toBe(`${labelsOf(bodies[1]!).trajectory_id}-1`);
+    expect(bodies[0]!.requestId).toMatch(/\/1$/);
+    expect(bodies[1]!.requestId).toMatch(/\/2$/);
+  });
+
+  it("starts a fresh cascade for a different conversation", async () => {
+    const bodies: Array<Record<string, any>> = [];
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, any>);
+      return sse(TEXT_SSE);
+    }) as unknown as typeof fetch;
+    const runner = new TurnRunner({
+      accounts: service([snapshot("a1")]),
+      fetchImpl,
+      identities: new ConversationRegistry(),
+    });
+
+    await runner.run(BASE);
+    await runner.run({
+      ...BASE,
+      contents: [{ role: "user", parts: [{ text: "outra conversa" }] }],
+    });
+
+    expect(bodies[1]!.request.labels.cascade_id).not.toBe(bodies[0]!.request.labels.cascade_id);
+    expect(bodies[1]!.request.labels.last_step_index).toBe("0");
   });
 
   it("records an upstream TOS block against the account and fails over to the next one", async () => {

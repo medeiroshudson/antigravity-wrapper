@@ -987,7 +987,12 @@ is embedded in the code.
 | `ANTIGRAVITY_CLIENT_ID` | — | OAuth client id (required) |
 | `ANTIGRAVITY_CLIENT_SECRET` | — | OAuth client secret (required) |
 | `ANTIGRAVITY_BASE_URL` | — | Override the upstream base; `https` only, host must be `*.googleapis.com` |
-| `ANTIGRAVITY_USER_AGENT` | CLI 1.2.4 fingerprint | Override the request fingerprint |
+| `ANTIGRAVITY_USER_AGENT` | — | Override the whole request fingerprint (wins over the five parts below) |
+| `ANTIGRAVITY_SUBCLIENT` | `cli` | Second segment of the fingerprint (the client passes `cli` or `hub`) |
+| `ANTIGRAVITY_CLIENT_VERSION` | `1.5.3` | Client version the fingerprint claims |
+| `ANTIGRAVITY_CLIENT_BUILD` | `1016078699` | Client `cl` (the language server's `--stamp` value) |
+| `ANTIGRAVITY_AUTH_METHOD` | `consumer` | Last segment of the fingerprint |
+| `ANTIGRAVITY_UA_PRODUCT` | `antigravity` | First segment of the fingerprint |
 | `ANTIGRAVITY_SEARCH_AUTO` | `false` | Enable Google Search Grounding by default on all Gemini chat requests |
 | `UPSTREAM_TIMEOUT_MS` | `120000` | Upstream request timeout |
 | `STREAM_HEADER_TIMEOUT_MS` | `180000` | Deadline for the stream's response headers |
@@ -1132,6 +1137,72 @@ request without it is answered `403 "You do not have a valid license of this pro
 The backend licenses access by client identity, so the fingerprint is what makes the
 signed-in account's entitlement apply. `ANTIGRAVITY_USER_AGENT` overrides it if you need
 to pin a different one.
+
+The value is built, not pinned, because both moving parts belong to the client. Captured
+from the installed CLI on 2026-11-09:
+
+```text
+antigravity/cli/1.5.3 (aidev_client; os_type=darwin; arch=arm64; cl=1016078699; auth_method=consumer)
+```
+
+The shape is `<product>/<subclient>/<version> (aidev_client; os_type=…; arch=…; cl=…; auth_method=…)`.
+`os_type` and `arch` come from the running process (the client is a Go binary and writes
+`darwin`/`linux`/`windows` and `arm64`/`amd64`), so they follow the host instead of the
+`linux`/`armd64` pair an older release hardcoded. `version` and `cl` follow the client's own
+release — it self-updates (measured: 1.4.6 → 1.5.3 inside one session, with `cl` moving from
+`1005129088` to `1016078699`), so they are read from the environment with the last measured
+values as defaults. When the client moves, set `ANTIGRAVITY_CLIENT_VERSION` and
+`ANTIGRAVITY_CLIENT_BUILD`; `--stamp` on the language server prints the latter as
+`Built at CL: …`.
+
+### Conversation identity
+
+The client does not mint a fresh identity per request. Captured from the CLI on the same
+date, one conversation keeps one `cascade_id` and one `trajectory_id`, reuses the same
+`sessionId`, and only advances the step:
+
+```json
+"labels": {
+  "cascade_id": "1aaf4873-…", "root_cascade_id": "1aaf4873-…",
+  "trajectory_id": "792c2922-…", "last_step_index": "0",
+  "model_enum": "MODEL_PLACEHOLDER_M318",
+  "request_id": "792c2922-…-0",
+  "used_claude": "false", "used_claude_conservative": "false", "used_non_gemini_model": "false"
+}
+```
+
+A second capture, of two consecutive turns (`agy -p …` then `agy -c -p …`), pins how the
+three counters relate:
+
+| | turn 1 | turn 2 |
+|---|---|---|
+| `labels.last_step_index` | `0` | `3` |
+| `request_id` | `<trajectory>-0` | `<trajectory>-1` |
+| `requestId` path segment | `…/1` | `…/4` |
+| `last_execution_id` | absent | `91a5ced3-…` (a UUID) |
+
+So the steps are **agent** steps, not turns: the second request starts after the first
+turn's internal steps, while `request_id` counts requests and the URL carries
+`last_step_index + 1`. `last_execution_id` names the previous request's execution and is a
+fresh UUID, not a derived id.
+
+The wrapper keys a conversation by its system instruction plus the first user message
+(`src/lib/chat/identity.ts`), keeps the cascade, trajectory and session ids for that key,
+and advances the step, the request counter and the execution id only after a turn finishes.
+Because this gateway sees one API call per turn, its step advances by exactly one where the
+client's advances by the number of internal agent steps; the shape (monotonic, URL =
+`last_step_index + 1`, `request_id` on its own counter) is preserved, the absolute numbers
+are smaller. `model_enum` comes from the catalog (`fetchAvailableModels` reports it per
+model) instead of being guessed; when the catalog has no entry the label is omitted rather
+than invented. The same key also pins the account: the account that served the previous turn
+goes first, because one cascade arriving from several Google accounts is the one routing
+shape a human cannot produce.
+
+`thinkingConfig` follows the same rule: the client sends
+`{"includeThoughts": true, "thinkingLevel": "HIGH"}` (levels `MINIMAL`/`LOW`/`MEDIUM`/`HIGH`,
+protojson spelling), not a `thinkingBudget`. The level is derived from the variant's degree,
+which was verified against the capture for `gemini-3.8-flash-high` → `HIGH`; a degree with no
+verified mapping keeps the catalog's budget.
 
 ### Revoking access
 

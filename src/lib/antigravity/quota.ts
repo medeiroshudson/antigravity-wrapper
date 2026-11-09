@@ -12,6 +12,9 @@ interface ModelsPayload {
       maxOutputTokens?: unknown;
       supportsThinking?: unknown;
       thinkingBudget?: unknown;
+      /** The backend's own model enum (e.g. `MODEL_PLACEHOLDER_M318`). */
+      model?: unknown;
+      thinkingLevel?: unknown;
     }
   >;
 }
@@ -194,6 +197,8 @@ export async function fetchAvailableModels(input: {
           maxOutputTokens: typeof info.maxOutputTokens === "number" ? info.maxOutputTokens : null,
           supportsThinking: info.supportsThinking === true,
           thinkingBudget: typeof info.thinkingBudget === "number" ? info.thinkingBudget : null,
+          backendEnum: typeof info.model === "string" && info.model.length > 0 ? info.model : null,
+          thinkingLevel: typeof info.thinkingLevel === "number" ? info.thinkingLevel : null,
         });
       }
       return entries;

@@ -6,8 +6,46 @@ export const ENDPOINTS = [
   "https://cloudcode-pa.googleapis.com",
 ] as const;
 
-export const DEFAULT_USER_AGENT =
-  "antigravity/cli/1.2.4 (aidev_client; os_type=linux; armd64; cl=982146307; auth_method=consumer)";
+/**
+ * The identity the upstream sees, captured from the installed client on 2026-11-09 over a
+ * local pass-through proxy:
+ *
+ *   antigravity/cli/1.5.3 (aidev_client; os_type=darwin; arch=arm64; cl=1016078699; auth_method=consumer)
+ *
+ * The shape is `<product>/<subclient>/<version> (aidev_client; os_type=…; arch=…; cl=…; auth_method=…)`.
+ * Both moving parts belong to the client, not to this wrapper: the CLI reports its own
+ * version and its `--stamp` build, and it self-updates (measured: 1.4.6 -> 1.5.3 during one
+ * session, with `cl` moving from 1005129088 to 1016078699). They are therefore read from the
+ * environment with the last measured values as defaults, so the identity can follow a client
+ * update without a release here.
+ */
+export const DEFAULT_CLIENT_VERSION = "1.5.3";
+export const DEFAULT_CLIENT_BUILD = "1016078699";
+
+/** `runtime.GOOS` spelling: the client is a Go binary and writes these names. */
+function platformName(): string {
+  if (process.platform === "win32") return "windows";
+  return process.platform;
+}
+
+/** `runtime.GOARCH` spelling (`x64` is Node's name for `amd64`). */
+function architectureName(): string {
+  if (process.arch === "x64") return "amd64";
+  if (process.arch === "ia32") return "386";
+  return process.arch;
+}
+
+export function buildUserAgent(env: NodeJS.ProcessEnv = process.env): string {
+  const override = env.ANTIGRAVITY_USER_AGENT?.trim();
+  if (override && override.length > 0) return override;
+
+  const product = env.ANTIGRAVITY_UA_PRODUCT?.trim() || "antigravity";
+  const subclient = env.ANTIGRAVITY_SUBCLIENT?.trim() || "cli";
+  const version = env.ANTIGRAVITY_CLIENT_VERSION?.trim() || DEFAULT_CLIENT_VERSION;
+  const build = env.ANTIGRAVITY_CLIENT_BUILD?.trim() || DEFAULT_CLIENT_BUILD;
+  const authMethod = env.ANTIGRAVITY_AUTH_METHOD?.trim() || "consumer";
+  return `${product}/${subclient}/${version} (aidev_client; os_type=${platformName()}; arch=${architectureName()}; cl=${build}; auth_method=${authMethod})`;
+}
 
 const ALLOWED_HOST_SUFFIX = ".googleapis.com";
 const ALLOWED_HOST_EXACT = "googleapis.com";
@@ -148,8 +186,7 @@ export function getLogLevel(env: NodeJS.ProcessEnv = process.env): LogLevel {
 }
 
 export function getUserAgent(env: NodeJS.ProcessEnv = process.env): string {
-  const value = env.ANTIGRAVITY_USER_AGENT?.trim();
-  return value && value.length > 0 ? value : DEFAULT_USER_AGENT;
+  return buildUserAgent(env);
 }
 
 export function getClientCredentials(env: NodeJS.ProcessEnv = process.env): {

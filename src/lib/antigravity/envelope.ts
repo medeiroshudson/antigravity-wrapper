@@ -1,4 +1,5 @@
-import { getRandomValues, randomUUID } from "node:crypto";
+import { getRandomValues } from "node:crypto";
+import type { ThinkingConfig } from "../../config/models.js";
 
 export interface GeminiTextPart { text: string; thoughtSignature?: string }
 export interface GeminiThoughtPart { thought: true; text: string; thoughtSignature?: string }
@@ -29,7 +30,7 @@ export interface GeminiRequestBody {
   systemInstruction: { role: "user"; parts: GeminiTextPart[] };
   generationConfig?: {
     maxOutputTokens?: number;
-    thinkingConfig?: { includeThoughts: boolean; thinkingBudget: number };
+    thinkingConfig?: ThinkingConfig;
     temperature?: number;
     topP?: number;
     topK?: number;
@@ -56,7 +57,7 @@ export interface EnvelopeInput {
   runtimeModel: string;
   contents: GeminiContent[];
   systemInstruction: string;
-  thinking: { includeThoughts: boolean; thinkingBudget: number };
+  thinking: ThinkingConfig;
   maxOutputTokens: number;
   temperature?: number;
   topP?: number;
@@ -71,44 +72,71 @@ export interface EnvelopeInput {
   requestId: string;
 }
 
-function randomInt64(): string {
+export function randomInt64(): string {
   const bytes = getRandomValues(new Uint8Array(8));
   return new DataView(bytes.buffer).getBigInt64(0, true).toString();
 }
 
-export function newRequestIdentity(
-  runtimeModel: string,
-  opts: { step?: number; requestIndex?: number } = {},
-): {
-  conversationId: string;
+/**
+ * The identity of one conversation, stable across its turns. Measured 2026-11-09: the
+ * client keeps one `cascade_id` and one `trajectory_id` for a whole conversation, reuses
+ * the same `sessionId`, and per turn only moves `last_step_index` / `request_id`.
+ */
+export interface ConversationIdentity {
+  cascadeId: string;
+  trajectoryId: string;
+  sessionId: string;
+  /**
+   * 1-based number of the step being requested. The URL carries it as-is and
+   * `last_step_index` carries `step - 1`, which is how the client sends a cascade whose
+   * steps already exist: measured 0 -> 1, then 3 -> 4 for the second turn.
+   */
+  step: number;
+  /** 0-based count of API requests already made in this cascade, for `request_id`. */
+  requestIndex: number;
+  /** The previous request's execution id, sent as `last_execution_id` from the 2nd request. */
+  lastExecutionId: string | null;
+}
+
+export interface RequestIdentity {
+  cascadeId: string;
   trajectoryId: string;
   requestId: string;
   labels: Record<string, string>;
   sessionId: string;
-} {
-  const step = Math.max(1, opts.step ?? 1);
-  const requestIndex = opts.requestIndex ?? Math.max(0, step - 1);
-  const conversationId = randomUUID();
-  const trajectoryId = randomUUID();
+}
+
+export function newRequestIdentity(
+  runtimeModel: string,
+  conversation: ConversationIdentity,
+  modelEnum: string | null = null,
+): RequestIdentity {
+  const step = Math.max(1, conversation.step);
+  const requestIndex = Math.max(0, conversation.requestIndex);
   const isClaude = runtimeModel.startsWith("claude-");
   const isNonGemini = !runtimeModel.startsWith("gemini-");
 
   const labels: Record<string, string> = {
-    last_step_index: String(Math.max(0, step - 1)),
-    request_id: `${trajectoryId}-${requestIndex}`,
-    trajectory_id: trajectoryId,
+    cascade_id: conversation.cascadeId,
+    root_cascade_id: conversation.cascadeId,
+    last_step_index: String(step - 1),
+    request_id: `${conversation.trajectoryId}-${requestIndex}`,
+    trajectory_id: conversation.trajectoryId,
     used_claude: isClaude ? "true" : "false",
     used_claude_conservative: isClaude ? "true" : "false",
     used_non_gemini_model: isNonGemini ? "true" : "false",
   };
-  if (step > 1) labels.last_execution_id = `exec-${trajectoryId}-${step - 1}`;
+  // Measured on the second turn: a UUID naming the execution the previous request ran in.
+  // Absent on the first request, where there is no previous execution to name.
+  if (conversation.lastExecutionId !== null) labels.last_execution_id = conversation.lastExecutionId;
+  if (modelEnum !== null) labels.model_enum = modelEnum;
 
   return {
-    conversationId,
-    trajectoryId,
-    requestId: `agent/${conversationId}/${Date.now()}/${trajectoryId}/${step}`,
+    cascadeId: conversation.cascadeId,
+    trajectoryId: conversation.trajectoryId,
+    requestId: `agent/${conversation.cascadeId}/${Date.now()}/${conversation.trajectoryId}/${step}`,
     labels,
-    sessionId: randomInt64(),
+    sessionId: conversation.sessionId,
   };
 }
 

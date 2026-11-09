@@ -4,6 +4,7 @@ import {
   getMaxOutputTokens,
   getPublicModels,
   getSupportedEfforts,
+  getModelEnum,
   getThinkingConfig,
   normalizeEffort,
   resetRegistryForTests,
@@ -222,31 +223,74 @@ describe("resolveRuntimeModel", () => {
   });
 });
 
+describe("getModelEnum", () => {
+  it("returns the backend enum the client puts in labels.model_enum", () => {
+    applyCatalog([
+      {
+        id: "gemini-3.8-flash-high",
+        displayName: "Gemini 3.8 Flash (High)",
+        maxTokens: 1_048_576,
+        maxOutputTokens: 65_536,
+        supportsThinking: true,
+        thinkingBudget: -1,
+        backendEnum: "MODEL_PLACEHOLDER_M318",
+      },
+    ]);
+    expect(getModelEnum("gemini-3.8-flash-high")).toBe("MODEL_PLACEHOLDER_M318");
+  });
+
+  it("returns null for an id the catalog never described", () => {
+    expect(getModelEnum("gemini-9.9-flash")).toBeNull();
+  });
+});
+
 describe("getThinkingConfig", () => {
   it("forces thinking off when the effort is off, whatever the catalog says", () => {
     applyCatalog(CATALOG);
     for (const runtimeId of ["gemini-3.8-flash-high", "claude-opus-4-6-thinking", "gpt-oss-120b-medium"]) {
-      expect(getThinkingConfig(runtimeId, "off")).toEqual({ includeThoughts: false, thinkingBudget: 0 });
+      expect(getThinkingConfig(runtimeId, "off")).toEqual({ includeThoughts: false });
     }
   });
 
-  it("uses the catalog's budget for the model", () => {
+  it("maps the variant degree to the wire thinking level the client sends", () => {
+    // Measured 2026-11-09: gemini-3.8-flash-high (degree 4 here) is sent as HIGH.
     applyCatalog(CATALOG);
-    expect(getThinkingConfig("gemini-3.8-flash-high", "high")).toEqual({ includeThoughts: true, thinkingBudget: -1 });
-    expect(getThinkingConfig("gemini-3.8-flash-medium", "medium")).toEqual({ includeThoughts: true, thinkingBudget: 4000 });
-    expect(getThinkingConfig("gemini-3.8-flash-low", "low")).toEqual({ includeThoughts: true, thinkingBudget: 1000 });
-    expect(getThinkingConfig("claude-opus-4-6-thinking", "high")).toEqual({ includeThoughts: true, thinkingBudget: 1024 });
-    expect(getThinkingConfig("gpt-oss-120b-medium", "medium")).toEqual({ includeThoughts: true, thinkingBudget: 8192 });
+    expect(getThinkingConfig("gemini-3.8-flash-high", "high")).toEqual({
+      includeThoughts: true,
+      thinkingLevel: "HIGH",
+    });
+    expect(getThinkingConfig("gemini-3.8-flash-medium", "medium")).toEqual({
+      includeThoughts: true,
+      thinkingLevel: "MEDIUM",
+    });
+    expect(getThinkingConfig("gemini-3.8-flash-low", "low")).toEqual({
+      includeThoughts: true,
+      thinkingLevel: "LOW",
+    });
+    expect(getThinkingConfig("gemini-3.5-flash-extra-low", "minimal")).toEqual({
+      includeThoughts: true,
+      thinkingLevel: "MINIMAL",
+    });
+  });
+
+  it("falls back to the catalog budget where no level maps", () => {
+    applyCatalog(CATALOG);
+    // The canonical id has degree 2, which the client spells MODEL_DEFAULT; the budget the
+    // catalog reports is the only measured value there, so it is what gets sent.
+    expect(getThinkingConfig("gemini-2.5-pro", "medium")).toEqual({
+      includeThoughts: true,
+      thinkingBudget: 1024,
+    });
   });
 
   it("reports no thinking for a model the catalog says cannot think", () => {
     applyCatalog([{ id: "gemini-9.9-flash-low", displayName: null, maxTokens: 100, maxOutputTokens: 50, supportsThinking: false, thinkingBudget: null }]);
-    expect(getThinkingConfig("gemini-9.9-flash-low", "high")).toEqual({ includeThoughts: false, thinkingBudget: 0 });
+    expect(getThinkingConfig("gemini-9.9-flash-low", "high")).toEqual({ includeThoughts: false });
   });
 
   it("reports no thinking for an unknown runtime id rather than throwing", () => {
     applyCatalog(CATALOG);
-    expect(getThinkingConfig("nao-existe", "high")).toEqual({ includeThoughts: false, thinkingBudget: 0 });
+    expect(getThinkingConfig("nao-existe", "high")).toEqual({ includeThoughts: false });
   });
 });
 

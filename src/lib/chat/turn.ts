@@ -1,8 +1,19 @@
 import { getMaxFailoverAttempts, getTransientRetryBackoffMs } from "../../config/index.js";
-import { getMaxOutputTokens, getThinkingConfig, type ReasoningEffort } from "../../config/models.js";
+import {
+  getMaxOutputTokens,
+  getModelEnum,
+  getThinkingConfig,
+  type ReasoningEffort,
+} from "../../config/models.js";
 import { t } from "../../i18n/index.js";
 import type { AccountService } from "../accounts/service.js";
-import { buildEnvelope, newRequestIdentity, type GeminiContent } from "../antigravity/envelope.js";
+import {
+  buildEnvelope,
+  newRequestIdentity,
+  type ConversationIdentity,
+  type GeminiContent,
+} from "../antigravity/envelope.js";
+import { ConversationRegistry } from "./identity.js";
 import { isDefinitive, ClientDisconnectedError, UpstreamError } from "../antigravity/errors.js";
 import { readSse, streamGenerate } from "../antigravity/rpc.js";
 import { noopLogger, type Logger } from "../logger.js";
@@ -83,6 +94,12 @@ export interface TurnDeps {
   env?: NodeJS.ProcessEnv;
   fetchImpl?: typeof fetch;
   logger?: Logger;
+  /**
+   * Conversation identity + account affinity. The server passes one shared registry so a
+   * conversation keeps its cascade and its account across requests; a TurnRunner built
+   * without one gets its own (tests, one-off callers).
+   */
+  identities?: ConversationRegistry;
 }
 
 /**
@@ -120,18 +137,36 @@ export function mapFinishReason(raw: string | undefined): { reason: string; warn
  * once the text starts flowing there is no way to switch accounts, and the
  * failure becomes a visible error (spec §6.3).
  */
+/** The account that served the previous turn goes first; the rest keeps its order. */
+function pinFirst<T extends { id: string }>(candidates: readonly T[], pinned: string | null): readonly T[] {
+  if (pinned === null) return candidates;
+  const index = candidates.findIndex((candidate) => candidate.id === pinned);
+  if (index <= 0) return candidates;
+  const ordered = [...candidates];
+  const [chosen] = ordered.splice(index, 1);
+  if (chosen) ordered.unshift(chosen);
+  return ordered;
+}
+
 export class TurnRunner {
   private readonly logger: Logger;
+  private readonly identities: ConversationRegistry;
 
   constructor(private readonly deps: TurnDeps) {
     this.logger = deps.logger ?? noopLogger;
+    this.identities = deps.identities ?? new ConversationRegistry();
   }
 
   async run(
     input: TurnInput,
     opts: { signal?: AbortSignal; onDelta?: (text: string) => void; onReasoningDelta?: (text: string) => void } = {},
   ): Promise<TurnOutcome> {
-    const candidates = await this.deps.accounts.orderFor(input.runtimeModel);
+    // The conversation keeps its cascade id and its account: switching accounts inside one
+    // conversation is the one routing shape a human cannot produce.
+    const key = this.identities.key(input.contents, input.systemInstruction);
+    const conversation = this.identities.state(key);
+    const ordered = await this.deps.accounts.orderFor(input.runtimeModel);
+    const candidates = pinFirst(ordered, conversation.accountId);
     const limit = getMaxFailoverAttempts(this.deps.env);
     const backoffMs = getTransientRetryBackoffMs(this.deps.env);
     const failures: Array<{
@@ -142,7 +177,13 @@ export class TurnRunner {
       appealUrl?: string | null;
     }> = [];
     this.logger.debug(
-      { runtimeModel: input.runtimeModel, candidates: candidates.map((c) => c.id), limit },
+      {
+        runtimeModel: input.runtimeModel,
+        cascadeId: conversation.cascadeId,
+        step: conversation.step,
+        candidates: candidates.map((c) => c.id),
+        limit,
+      },
       "turn candidates",
     );
     // The first definitive error seen across the pool. A 404 is authoritative for an
@@ -170,7 +211,14 @@ export class TurnRunner {
             throw new UpstreamError("server_error", 0, t("chat.accountWithoutProjectId"));
           }
           this.deps.accounts.markUsed(candidate.id);
-          const result = await this.runOnce(input, fresh.accessToken ?? "", fresh.projectId, opts);
+          const result = await this.runOnce(
+            input,
+            fresh.accessToken ?? "",
+            fresh.projectId,
+            opts,
+            conversation,
+          );
+          this.identities.recordSuccess(key, candidate.id);
           return { result, accountId: candidate.id };
         } catch (error) {
           if (!(error instanceof UpstreamError)) throw error;
@@ -268,8 +316,9 @@ export class TurnRunner {
     accessToken: string,
     projectId: string,
     opts: { signal?: AbortSignal; onDelta?: (text: string) => void; onReasoningDelta?: (text: string) => void },
+    conversation: ConversationIdentity,
   ): Promise<TurnResult> {
-    const identity = newRequestIdentity(input.runtimeModel);
+    const identity = newRequestIdentity(input.runtimeModel, conversation, getModelEnum(input.runtimeModel));
     const maxOutputTokens = getMaxOutputTokens(input.runtimeModel);
     const envelope = buildEnvelope({
       projectId,

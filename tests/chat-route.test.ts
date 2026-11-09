@@ -6,6 +6,7 @@ import { AccountStore } from "../src/lib/accounts/store.js";
 import { applyCatalog, resetRegistryForTests } from "../src/config/models.js";
 import { CATALOG } from "./fixtures/catalog.js";
 import { TOS_APPEAL_URL, TOS_VIOLATION_BODY } from "./fixtures/tos.js";
+import { resetConversationRegistryForTests } from "../src/lib/chat/identity.js";
 
 const auth = { authorization: "Bearer test-key" };
 const ENV = { ANTIGRAVITY_CLIENT_ID: "c", ANTIGRAVITY_CLIENT_SECRET: "s" };
@@ -82,6 +83,8 @@ beforeEach(() => {
   // every id until a catalog is applied. This is the catalog for the whole file; the tests
   // that need a different one apply it themselves.
   applyCatalog(CATALOG);
+  // The route shares one conversation registry per process; each test starts fresh.
+  resetConversationRegistryForTests();
   seed();
 });
 

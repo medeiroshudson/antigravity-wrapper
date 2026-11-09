@@ -115,16 +115,37 @@ describe("getBodyLimitBytes", () => {
 });
 
 describe("getUserAgent", () => {
-  it("returns the CLI fingerprint by default", () => {
-    expect(getUserAgent({})).toBe(
-      "antigravity/cli/1.2.4 (aidev_client; os_type=linux; armd64; cl=982146307; auth_method=consumer)",
-    );
+  it("builds the measured shape, in the client's own spelling", () => {
+    // Captured from the installed client on 2026-11-09:
+    // antigravity/cli/1.5.3 (aidev_client; os_type=darwin; arch=arm64; cl=1016078699; auth_method=consumer)
+    expect(
+      getUserAgent({
+        ANTIGRAVITY_CLIENT_VERSION: "9.9.9",
+        ANTIGRAVITY_CLIENT_BUILD: "42",
+        ANTIGRAVITY_SUBCLIENT: "hub",
+      }),
+    ).toBe(`antigravity/hub/9.9.9 (aidev_client; os_type=${process.platform}; arch=${architecture()}; cl=42; auth_method=consumer)`);
+  });
+
+  it("reports the runtime platform and arch, not a frozen pair", () => {
+    // The old constant said os_type=linux and "armd64" (a transcription of arch=arm64) on
+    // every host, which no client does.
+    const ua = getUserAgent({});
+    expect(ua).toContain(`os_type=${process.platform}`);
+    expect(ua).toContain(`arch=${architecture()}`);
+    expect(ua).not.toContain("armd64");
   });
 
   it("honors the override", () => {
     expect(getUserAgent({ ANTIGRAVITY_USER_AGENT: "custom/1" })).toBe("custom/1");
   });
 });
+
+function architecture(): string {
+  if (process.arch === "x64") return "amd64";
+  if (process.arch === "ia32") return "386";
+  return process.arch;
+}
 
 describe("redact", () => {
   it("removes access and refresh tokens", () => {
