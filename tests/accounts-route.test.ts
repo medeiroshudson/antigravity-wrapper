@@ -3,6 +3,7 @@ import type { FastifyInstance } from "fastify";
 import { buildServer } from "../src/server.js";
 import { resetRegistryForTests } from "../src/config/models.js";
 import { AccountStore } from "../src/lib/accounts/store.js";
+import { TOS_VIOLATION_BODY } from "./fixtures/tos.js";
 
 const auth = { authorization: "Bearer test-key" };
 const ENV = { ANTIGRAVITY_CLIENT_ID: "cid", ANTIGRAVITY_CLIENT_SECRET: "sec" };
@@ -48,6 +49,62 @@ describe("GET /admin/accounts", () => {
       usable: false,
       statusKind: "operator_disabled",
     });
+  });
+});
+
+describe("POST /admin/accounts/:id/recheck", () => {
+  function seed() {
+    store.upsertAccount({
+      id: "a1",
+      email: "a1@x.com",
+      refreshToken: "r",
+      accessToken: "tok",
+      accessExpiresAt: Date.now() + 3_600_000,
+      projectId: "aicode-consumers",
+    });
+  }
+
+  it("clears a recorded block when the upstream serves the probe", async () => {
+    seed();
+    store.setStatus("a1", "invalid", { statusKind: "tos_blocked", lastError: "blocked" });
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response("data: {}\n\n", { status: 200, headers: { "content-type": "text/event-stream" } }),
+    ) as unknown as typeof fetch;
+    app = buildServer("test-key", { store, env: ENV, fetchImpl, logger: false });
+
+    const res = await app.inject({ method: "POST", url: "/admin/accounts/a1/recheck", headers: auth });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().probe).toMatchObject({ ok: true, status: 200 });
+    expect(res.json().account).toMatchObject({
+      status: "active",
+      state: "active",
+      usable: true,
+      statusKind: null,
+      lastError: null,
+    });
+  });
+
+  it("keeps the block, with the appeal, when the upstream repeats TOS_VIOLATION", async () => {
+    seed();
+    const fetchImpl = vi.fn(
+      async () => new Response(TOS_VIOLATION_BODY, { status: 403 }),
+    ) as unknown as typeof fetch;
+    app = buildServer("test-key", { store, env: ENV, fetchImpl, logger: false });
+
+    const res = await app.inject({ method: "POST", url: "/admin/accounts/a1/recheck", headers: auth });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().probe).toMatchObject({ ok: false, status: 403, kind: "account_blocked" });
+    expect(res.json().account).toMatchObject({ status: "invalid", state: "invalid", statusKind: "tos_blocked" });
+    expect(res.json().account.lastError).toContain("forms.gle");
+  });
+
+  it("returns 404 for an account that does not exist", async () => {
+    app = buildServer("test-key", { store, env: ENV, logger: false });
+    const res = await app.inject({ method: "POST", url: "/admin/accounts/nope/recheck", headers: auth });
+    expect(res.statusCode).toBe(404);
   });
 });
 

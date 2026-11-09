@@ -563,6 +563,31 @@ curl -s -X POST http://127.0.0.1:3000/admin/accounts/account-3f2a91bc77de0d14/re
   -H "Authorization: Bearer $API_KEY"
 ```
 
+### Recheck an account the upstream refused
+
+A blocked account is invisible to every automatic path: while `invalid` it is never
+selected, the quota refresh keeps succeeding for it (measured during the 2026-11-05
+incident: 945 refreshes per banned account), and `countTokens` does not cross the ToS gate
+(it answers `200` for a blocked account while `generateContent` answers `403`). The only
+cheap way to learn whether Google reinstated it is to ask for one token:
+
+```bash
+curl -s -X POST http://127.0.0.1:3000/admin/accounts/account-3f2a91bc77de0d14/recheck \
+  -H "Authorization: Bearer $API_KEY"
+```
+
+```json
+{
+  "account": { "status": "active", "state": "active", "usable": true, "statusKind": null, "lastError": null },
+  "probe": { "ok": true, "status": 200, "kind": null, "message": null, "appealUrl": null }
+}
+```
+
+A served probe clears the block (`status: active`, `statusKind: null`); a repeated refusal
+reapplies it, with the appeal link in `lastError`. The probe never throws for an upstream
+verdict — the verdict is the response. `enabled` is left untouched, so an account the
+operator parked still needs `PATCH {"enabled": true}`.
+
 ### Inspect the whole pool's quota
 
 ```bash

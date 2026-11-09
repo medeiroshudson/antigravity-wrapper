@@ -4,6 +4,8 @@ import { getClientCredentials } from "../config/index.js";
 import { applyCatalog } from "../config/models.js";
 import { t } from "../i18n/index.js";
 import { AccountService } from "../lib/accounts/service.js";
+import { probeAccount } from "../lib/accounts/probe.js";
+import { UpstreamError } from "../lib/antigravity/errors.js";
 import {
   buildAuthUrl,
   discoverProjectId,
@@ -236,6 +238,47 @@ export async function accountsRoutes(app: FastifyInstance, deps: RouteDeps = {})
     if (!store.getAccount(request.params.id)) return notFound(reply);
     store.removeAccount(request.params.id);
     reply.status(200).send({ removed: request.params.id });
+  });
+
+  /**
+   * Asks the upstream whether it still refuses the account, and applies the verdict.
+   *
+   * A reinstated account is invisible otherwise: it is excluded from the selector while
+   * `invalid`, the quota refresh keeps succeeding for a blocked account, and `countTokens`
+   * does not cross the ToS gate. This is the only path back that costs one request.
+   */
+  app.post<{ Params: { id: string } }>("/admin/accounts/:id/recheck", async (request, reply) => {
+    const account = store.getAccount(request.params.id);
+    if (!account) return notFound(reply);
+
+    const service = resolveService();
+    try {
+      const probe = await probeAccount(
+        {
+          ensureFresh: (candidate) => service.ensureFresh(candidate),
+          env: deps.env,
+          fetchImpl: deps.fetchImpl,
+        },
+        account,
+      );
+
+      if (probe.ok) {
+        store.setStatus(account.id, "active", { statusKind: null });
+      } else if (probe.kind !== null) {
+        service.applyFailure(
+          account.id,
+          new UpstreamError(probe.kind, probe.status, probe.message ?? "", null, probe.appealUrl),
+        );
+      }
+
+      reply.status(200).send({
+        account: publicView(store.getAccount(account.id)),
+        probe,
+      });
+    } catch (error) {
+      const mapped = toOpenAIErrorBody(error, 502);
+      reply.status(mapped.status).send(mapped.body);
+    }
   });
 
   app.post<{ Params: { id: string } }>("/admin/accounts/:id/refresh", async (request, reply) => {
