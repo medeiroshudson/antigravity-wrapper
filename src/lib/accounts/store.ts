@@ -5,6 +5,40 @@ import { t } from "../../i18n/index.js";
 
 export type AccountStatus = "active" | "cooldown" | "invalid";
 
+/**
+ * Why an account is not serving. `status` alone cannot answer that: a TOS block, a failed
+ * re-authentication and an operator disabling the account all look like "not active", and
+ * before this field only `lastError` (free text) hinted at it.
+ */
+export type AccountStatusKind =
+  | "tos_blocked"
+  | "validation_required"
+  | "auth"
+  | "quota"
+  | "rate_limited"
+  | "operator_disabled";
+
+/** The effective state, which is what an operator actually asks for. */
+export type AccountState = "active" | "cooling" | "invalid" | "disabled";
+
+/**
+ * One derived answer from the three stored fields. `invalid` outranks `disabled`: an
+ * upstream refusal stays the actionable fact even when the operator also parked the
+ * account. A cooldown with no date has already expired (same rule the selector uses).
+ */
+export function accountState(account: Account, now: number = Date.now()): AccountState {
+  if (account.status === "invalid") return "invalid";
+  if (!account.enabled) return "disabled";
+  if (account.status === "cooldown" && account.cooldownUntil !== null && account.cooldownUntil > now) {
+    return "cooling";
+  }
+  return "active";
+}
+
+export function isUsable(account: Account, now: number = Date.now()): boolean {
+  return accountState(account, now) === "active";
+}
+
 export interface Account {
   id: string;
   email: string | null;
@@ -13,6 +47,7 @@ export interface Account {
   accessExpiresAt: number;
   projectId: string | null;
   status: AccountStatus;
+  statusKind: AccountStatusKind | null;
   cooldownUntil: number | null;
   lastError: string | null;
   quotaSummaryError: string | null;
@@ -55,6 +90,7 @@ interface Row {
   access_expires_at: number;
   project_id: string | null;
   status: string;
+  status_kind: string | null;
   cooldown_until: number | null;
   last_error: string | null;
   quota_summary_error: string | null;
@@ -75,6 +111,7 @@ function toAccount(row: Row): Account {
     accessExpiresAt: row.access_expires_at,
     projectId: row.project_id,
     status: row.status as AccountStatus,
+    statusKind: (row.status_kind as AccountStatusKind | null) ?? null,
     cooldownUntil: row.cooldown_until,
     lastError: row.last_error,
     quotaSummaryError: row.quota_summary_error,
@@ -103,7 +140,7 @@ export class AccountStore {
         access_token TEXT, access_expires_at INTEGER NOT NULL DEFAULT 0,
         project_id TEXT, status TEXT NOT NULL DEFAULT 'active',
         cooldown_until INTEGER, last_error TEXT, quota_summary_error TEXT,
-        paid_tier_id TEXT, paid_tier_name TEXT,
+        paid_tier_id TEXT, paid_tier_name TEXT, status_kind TEXT,
         enabled INTEGER NOT NULL DEFAULT 1, priority INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL, last_used_at INTEGER
       );
@@ -114,6 +151,18 @@ export class AccountStore {
     // quota_snapshots is created by the migrator, not here: the migrator's job is to
     // drop a previous shape and install the current one, in one place.
     this.migrate();
+    // Additive column, independent of the destructive version step: a new column does not
+    // justify re-running the quota rebuild.
+    this.ensureColumns([["status_kind", "TEXT"]]);
+    // Rows parked before the column existed: the only way `enabled` becomes 0 is an
+    // operator action, so that is what the backfill records (and only once — afterwards
+    // the kind is set and the guard skips them).
+    this.db
+      .prepare(
+        `UPDATE accounts SET status_kind = 'operator_disabled', last_error = COALESCE(last_error, ?)
+         WHERE enabled = 0 AND status_kind IS NULL`,
+      )
+      .run(t("account.disabledByOperator"));
     // Reinforcement: WAL just created the sidecars; ensure 0600 on them too.
     this.applyRestrictiveMode(dbPath);
   }
@@ -148,14 +197,18 @@ export class AccountStore {
       ["paid_tier_id", "TEXT"],
       ["paid_tier_name", "TEXT"],
     ];
-    for (const [column, type] of added) {
+    this.ensureColumns(added);
+    this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+  }
+
+  private ensureColumns(columns: Array<[string, string]>): void {
+    for (const [column, type] of columns) {
       if (!this.hasColumn("accounts", column)) {
         // Column names are literals from this table, never caller input, so the
         // interpolation cannot be injected through.
         this.db.exec(`ALTER TABLE accounts ADD COLUMN ${column} ${type}`);
       }
     }
-    this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   }
 
   private hasColumn(table: string, column: string): boolean {
@@ -202,7 +255,7 @@ export class AccountStore {
            email = excluded.email, refresh_token = excluded.refresh_token,
            access_token = excluded.access_token, access_expires_at = excluded.access_expires_at,
            project_id = excluded.project_id, status = 'active', cooldown_until = NULL,
-           last_error = NULL, quota_summary_error = NULL`,
+           last_error = NULL, status_kind = NULL, quota_summary_error = NULL`,
       )
       .run(input.id, input.email, input.refreshToken, input.accessToken, input.accessExpiresAt, input.projectId, now);
     const account = this.getAccount(input.id);
@@ -222,7 +275,8 @@ export class AccountStore {
   private expireCooldowns(now: number = Date.now()): void {
     this.db
       .prepare(
-        `UPDATE accounts SET status = 'active', cooldown_until = NULL
+        `UPDATE accounts SET status = 'active', cooldown_until = NULL,
+           status_kind = CASE WHEN status_kind IN ('quota','rate_limited') THEN NULL ELSE status_kind END
          WHERE status = 'cooldown' AND (cooldown_until IS NULL OR cooldown_until <= ?)`,
       )
       .run(now);
@@ -245,11 +299,21 @@ export class AccountStore {
   setStatus(
     id: string,
     status: AccountStatus,
-    opts: { cooldownUntil?: number; lastError?: string } = {},
+    opts: {
+      cooldownUntil?: number;
+      lastError?: string;
+      statusKind?: AccountStatusKind | null;
+    } = {},
   ): void {
     this.db
-      .prepare("UPDATE accounts SET status = ?, cooldown_until = ?, last_error = ? WHERE id = ?")
-      .run(status, status === "cooldown" ? (opts.cooldownUntil ?? null) : null, opts.lastError ?? null, id);
+      .prepare("UPDATE accounts SET status = ?, cooldown_until = ?, last_error = ?, status_kind = ? WHERE id = ?")
+      .run(
+        status,
+        status === "cooldown" ? (opts.cooldownUntil ?? null) : null,
+        opts.lastError ?? null,
+        opts.statusKind ?? null,
+        id,
+      );
   }
 
   /**
@@ -280,8 +344,31 @@ export class AccountStore {
       .run(tokens.accessToken, tokens.accessExpiresAt, id);
   }
 
+  /**
+   * Parks or releases the account. Disabling records why (the listing used to show
+   * `enabled=false` with no reason at all); enabling clears that note but never an
+   * upstream verdict — a TOS block stays recorded while the operator decides.
+   */
   setEnabled(id: string, enabled: boolean): void {
-    this.db.prepare("UPDATE accounts SET enabled = ? WHERE id = ?").run(enabled ? 1 : 0, id);
+    if (!enabled) {
+      this.db
+        .prepare(
+          `UPDATE accounts SET enabled = 0,
+             status_kind = COALESCE(status_kind, 'operator_disabled'),
+             last_error = COALESCE(last_error, ?)
+           WHERE id = ?`,
+        )
+        .run(t("account.disabledByOperator"), id);
+      return;
+    }
+    this.db
+      .prepare(
+        `UPDATE accounts SET enabled = 1,
+           status_kind = CASE WHEN status_kind = 'operator_disabled' THEN NULL ELSE status_kind END,
+           last_error = CASE WHEN status_kind = 'operator_disabled' THEN NULL ELSE last_error END
+         WHERE id = ?`,
+      )
+      .run(id);
   }
 
   setPriority(id: string, priority: number): void {

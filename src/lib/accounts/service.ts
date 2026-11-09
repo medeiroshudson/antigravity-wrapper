@@ -100,15 +100,17 @@ export class AccountService {
         this.deps.store.setStatus(id, "cooldown", {
           cooldownUntil: now + (error.retryAfterMs ?? getCooldownTransientMs(this.deps.env)),
           lastError: error.message,
+          statusKind: error.kind === "quota" ? "quota" : "rate_limited",
         });
         return;
       case "validation_required":
         this.deps.store.setStatus(id, "invalid", {
           lastError: t("account.validationRequired"),
+          statusKind: "validation_required",
         });
         return;
       case "auth":
-        this.deps.store.setStatus(id, "invalid", { lastError: error.message });
+        this.deps.store.setStatus(id, "invalid", { lastError: error.message, statusKind: "auth" });
         return;
       case "account_blocked":
         // The ban belongs to this account, so keep it out of the rotation and record why
@@ -119,6 +121,7 @@ export class AccountService {
             error.appealUrl === null
               ? t("account.tosBlockedNoAppeal")
               : t("account.tosBlocked", { appeal: error.appealUrl }),
+          statusKind: "tos_blocked",
         });
         return;
       default:

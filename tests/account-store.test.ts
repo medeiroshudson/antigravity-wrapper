@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { AccountStore } from "../src/lib/accounts/store.js";
+import { AccountStore, accountState } from "../src/lib/accounts/store.js";
 
 let dir: string;
 let store: AccountStore;
@@ -69,6 +69,68 @@ describe("AccountStore", () => {
     store.setTokens("a1", { accessToken: "novo", accessExpiresAt: Date.now() + 1000 });
     expect(store.listAccounts()).toHaveLength(1);
     expect(store.getAccount("a1")?.accessToken).toBe("novo");
+  });
+
+  it("backfills an account parked before the cause column existed", () => {
+    add();
+    store.raw().exec("UPDATE accounts SET enabled = 0, status_kind = NULL, last_error = NULL");
+    store.close();
+
+    store = new AccountStore(join(dir, "test.db"));
+    expect(store.getAccount("a1")).toMatchObject({
+      enabled: false,
+      statusKind: "operator_disabled",
+      lastError: "disabled by operator",
+    });
+  });
+
+  it("records why an account was disabled, and clears that note on re-enable", () => {
+    add();
+    store.setEnabled("a1", false);
+    expect(store.getAccount("a1")).toMatchObject({
+      enabled: false,
+      statusKind: "operator_disabled",
+      lastError: "disabled by operator",
+    });
+
+    store.setEnabled("a1", true);
+    expect(store.getAccount("a1")).toMatchObject({ enabled: true, statusKind: null, lastError: null });
+  });
+
+  it("keeps an upstream verdict when the operator parks or releases the account", () => {
+    // Disabling says "I parked it"; it does not erase why the upstream refuses it.
+    add();
+    store.setStatus("a1", "invalid", { lastError: "blocked", statusKind: "tos_blocked" });
+    store.setEnabled("a1", false);
+    expect(store.getAccount("a1")).toMatchObject({ statusKind: "tos_blocked", lastError: "blocked" });
+
+    store.setEnabled("a1", true);
+    expect(store.getAccount("a1")).toMatchObject({ statusKind: "tos_blocked", lastError: "blocked" });
+  });
+
+  it("derives the effective state, with invalid outranking disabled", () => {
+    add();
+    const now = Date.now();
+    expect(accountState(store.getAccount("a1")!, now)).toBe("active");
+
+    store.setEnabled("a1", false);
+    expect(accountState(store.getAccount("a1")!, now)).toBe("disabled");
+
+    store.setStatus("a1", "invalid", { lastError: "blocked", statusKind: "tos_blocked" });
+    expect(accountState(store.getAccount("a1")!, now)).toBe("invalid");
+  });
+
+  it("drops a quota park from the cause once the cooldown expires, keeping the history", () => {
+    add();
+    store.setStatus("a1", "cooldown", {
+      cooldownUntil: Date.now() - 1,
+      lastError: "quota wall",
+      statusKind: "quota",
+    });
+    const account = store.getAccount("a1");
+    expect(account?.status).toBe("active");
+    expect(account?.statusKind).toBeNull();
+    expect(account?.lastError).toBe("quota wall");
   });
 
   it("reactivates the state on upsert and preserves identity fields", () => {

@@ -21,6 +21,36 @@ afterEach(async () => {
   store.close();
 });
 
+describe("GET /admin/accounts", () => {
+  it("reports the effective state and its cause, not just 'active'", async () => {
+    store.upsertAccount({
+      id: "a1",
+      email: "a1@x.com",
+      refreshToken: "r",
+      accessToken: "t",
+      accessExpiresAt: Date.now() + 3_600_000,
+      projectId: "aicode-consumers",
+    });
+    app = buildServer("test-key", { store, env: ENV, logger: false });
+
+    await app.inject({
+      method: "PATCH",
+      url: "/admin/accounts/a1",
+      headers: auth,
+      payload: { enabled: false },
+    });
+
+    const list = await app.inject({ method: "GET", url: "/admin/accounts", headers: auth });
+    expect(list.json().accounts[0]).toMatchObject({
+      status: "active",
+      enabled: false,
+      state: "disabled",
+      usable: false,
+      statusKind: "operator_disabled",
+    });
+  });
+});
+
 describe("POST /admin/accounts/start", () => {
   it("returns authUrl and state, and stores the verifier", async () => {
     app = buildServer("test-key", { store, env: ENV, logger: false });

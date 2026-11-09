@@ -31,6 +31,7 @@ const enUS = {
   "account.refreshFailed": "failed to renew the access token",
   "account.validationRequired":
     "Account requires browser verification (VALIDATION_REQUIRED); retrying will not help.",
+  "account.disabledByOperator": "disabled by operator",
   "account.tosBlocked":
     "Upstream blocked this account for a Terms of Service violation (403 TOS_VIOLATION). Appeal: {appeal}. It stays out of the pool until Google reinstates it and the account is re-onboarded.",
   "account.tosBlockedNoAppeal":

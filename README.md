@@ -335,6 +335,9 @@ not fail the login), and stores everything:
     "email": "hudson@gmail.com",
     "projectId": "aicode-consumers",
     "status": "active",
+    "state": "active",
+    "usable": true,
+    "statusKind": null,
     "paidTier": { "id": "g1-pro-tier", "name": "Google AI Pro" },
     "cooldownUntil": null,
     "cooldownResetsIn": null,
@@ -346,6 +349,23 @@ not fail the login), and stores everything:
   }
 }
 ```
+
+#### Effective state and its cause
+
+`status` alone does not answer "is this account serving?": it is the pool machine
+(`active` | `cooldown` | `invalid`) and never carries `enabled`, so an account parked by the
+operator reads `status: "active", enabled: false`. Two derived fields close that gap:
+
+| Field | Meaning |
+|---|---|
+| `state` | `active` \| `cooling` \| `invalid` \| `disabled` — derived from `status`, `enabled` and the cooldown. `invalid` outranks `disabled`, so an upstream refusal is never hidden by a parking decision. |
+| `usable` | `state === "active"`. An administrative answer, not a quota one: a usable account can still be out of quota for one model family. |
+| `statusKind` | Why, machine-readably: `tos_blocked` \| `validation_required` \| `auth` \| `quota` \| `rate_limited` \| `operator_disabled`, or `null`. |
+
+`statusKind` survives the action that follows it: disabling an account the upstream already
+blocked keeps `tos_blocked` (and its `lastError` with the appeal link) instead of overwriting
+it with `operator_disabled`, and re-enabling clears only an operator note. A quota park drops
+its kind when the cooldown expires, keeping `lastError` as history.
 
 `paidTier` is an object, `{ "id": …, "name": … }`, or `null` when the tier has not been
 read yet. The **`id`** is the stable field to branch on — `g1-pro-tier` for Google AI Pro,

@@ -16,7 +16,7 @@ import { toIsoUtc, toResetPhrase } from "../lib/format/datetime.js";
 import { toGroupsView, toLeanPoolQuota } from "../lib/format/quota.js";
 import { toOpenAIErrorBody } from "../lib/openai-format/index.js";
 import { getAccountService, getStore } from "../lib/runtime.js";
-import type { Account, AccountStore } from "../lib/accounts/store.js";
+import { accountState, isUsable, type Account, type AccountStore } from "../lib/accounts/store.js";
 
 interface RouteDeps {
   env?: NodeJS.ProcessEnv;
@@ -40,6 +40,11 @@ function publicView(
     email: account.email ?? null,
     projectId: account.projectId,
     status: account.status,
+    // `status` alone never answers "why is this account not serving"; state derives it
+    // from status + enabled + the cooldown, and statusKind names the cause.
+    state: accountState(account, now),
+    usable: isUsable(account, now),
+    statusKind: account.statusKind,
     // Both halves, or null when the tier was never read. An object absent entirely
     // would be indistinguishable from an account whose tier is unknown.
     paidTier:

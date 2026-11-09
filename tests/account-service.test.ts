@@ -70,6 +70,19 @@ describe("applyFailure", () => {
     expect(account?.cooldownUntil).toBeGreaterThan(Date.now() + 3_600_000);
   });
 
+  it("records the cause alongside the state, so a parked account is explainable", () => {
+    seed();
+    const service = new AccountService({ store, env: ENV });
+    service.applyFailure("a1", new UpstreamError("quota", 429, "quota", 7_200_000));
+    expect(store.getAccount("a1")?.statusKind).toBe("quota");
+
+    service.applyFailure("a1", new UpstreamError("transient_rate_limit", 429, "slow down"));
+    expect(store.getAccount("a1")?.statusKind).toBe("rate_limited");
+
+    service.applyFailure("a1", new UpstreamError("auth", 401, "expired"));
+    expect(store.getAccount("a1")?.statusKind).toBe("auth");
+  });
+
   it("places account in cooldown on transient_rate_limit", () => {
     seed("a1");
     const service = new AccountService({ store, env: { ...ENV, COOLDOWN_TRANSIENT_MS: "45000" } });
