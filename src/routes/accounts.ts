@@ -264,6 +264,10 @@ export async function accountsRoutes(app: FastifyInstance, deps: RouteDeps = {})
 
       if (probe.ok) {
         store.setStatus(account.id, "active", { statusKind: null });
+        // A reinstated account is one the operator parked *because* of the block: a
+        // disabled account makes no request, so it cannot have gained the block while
+        // parked. Leaving it disabled reported "liberada" while routing nothing to it.
+        store.setEnabled(account.id, true);
       } else if (probe.kind !== null) {
         service.applyFailure(
           account.id,

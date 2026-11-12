@@ -64,9 +64,10 @@ describe("POST /admin/accounts/:id/recheck", () => {
     });
   }
 
-  it("clears a recorded block when the upstream serves the probe", async () => {
+  it("clears a recorded block and re-enables the account when the upstream serves the probe", async () => {
     seed();
     store.setStatus("a1", "invalid", { statusKind: "tos_blocked", lastError: "blocked" });
+    store.setEnabled("a1", false);
     const fetchImpl = vi.fn(
       async () =>
         new Response("data: {}\n\n", { status: 200, headers: { "content-type": "text/event-stream" } }),
@@ -81,9 +82,24 @@ describe("POST /admin/accounts/:id/recheck", () => {
       status: "active",
       state: "active",
       usable: true,
+      enabled: true,
       statusKind: null,
       lastError: null,
     });
+  });
+
+  it("leaves the account parked when the upstream still refuses it", async () => {
+    seed();
+    store.setStatus("a1", "invalid", { statusKind: "tos_blocked", lastError: "blocked" });
+    store.setEnabled("a1", false);
+    const fetchImpl = vi.fn(
+      async () => new Response(TOS_VIOLATION_BODY, { status: 403 }),
+    ) as unknown as typeof fetch;
+    app = buildServer("test-key", { store, env: ENV, fetchImpl, logger: false });
+
+    const res = await app.inject({ method: "POST", url: "/admin/accounts/a1/recheck", headers: auth });
+
+    expect(res.json().account).toMatchObject({ state: "invalid", enabled: false });
   });
 
   it("keeps the block, with the appeal, when the upstream repeats TOS_VIOLATION", async () => {

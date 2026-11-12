@@ -583,10 +583,12 @@ curl -s -X POST http://127.0.0.1:3000/admin/accounts/account-3f2a91bc77de0d14/re
 }
 ```
 
-A served probe clears the block (`status: active`, `statusKind: null`); a repeated refusal
-reapplies it, with the appeal link in `lastError`. The probe never throws for an upstream
-verdict — the verdict is the response. `enabled` is left untouched, so an account the
-operator parked still needs `PATCH {"enabled": true}`.
+A served probe clears the block (`status: active`, `statusKind: null`) **and re-enables the
+account**, because a disabled account makes no request and therefore cannot have gained the
+block while parked: the pair `disabled + tos_blocked` only comes from "the upstream blocked
+it, then I parked it". A repeated refusal reapplies the block, with the appeal link in
+`lastError`, and leaves `enabled` where it was. The probe never throws for an upstream
+verdict — the verdict is the response.
 
 ### Inspect the whole pool's quota
 
