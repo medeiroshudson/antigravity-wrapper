@@ -1,19 +1,17 @@
 import { randomBytes } from "node:crypto";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { getClientCredentials } from "../config/index.js";
-import { applyCatalog } from "../config/models.js";
 import { t } from "../i18n/index.js";
 import { AccountService } from "../lib/accounts/service.js";
 import { probeAccount } from "../lib/accounts/probe.js";
 import { UpstreamError } from "../lib/antigravity/errors.js";
 import {
   buildAuthUrl,
-  discoverProjectId,
   exchangeCode,
   generatePkce,
   getUserEmail,
+  type OnboardingOutcome,
 } from "../lib/antigravity/oauth.js";
-import { fetchAvailableModels } from "../lib/antigravity/quota.js";
 import { toIsoUtc, toResetPhrase } from "../lib/format/datetime.js";
 import { toGroupsView, toLeanPoolQuota } from "../lib/format/quota.js";
 import { toOpenAIErrorBody } from "../lib/openai-format/index.js";
@@ -61,6 +59,39 @@ function publicView(
     createdAt: toIsoUtc(account.createdAt),
     lastUsedAt: toIsoUtc(account.lastUsedAt),
   };
+}
+
+/**
+ * The onboarding result as the admin surface reports it: the outcome the service recorded
+ * is the same fact the endpoint answers, so the two cannot disagree (spec D6).
+ */
+function onboardingView(outcome: OnboardingOutcome): Record<string, unknown> {
+  switch (outcome.status) {
+    case "active":
+      return {
+        status: outcome.status,
+        projectId: outcome.projectId,
+        paidTier: { id: outcome.paidTierId, name: outcome.paidTierName },
+      };
+    case "validation_required":
+      return {
+        status: outcome.status,
+        validationUrl: outcome.validationUrl,
+        reason: outcome.reason,
+      };
+    default:
+      return { status: outcome.status, code: outcome.code };
+  }
+}
+
+/**
+ * The two failure sentences `discoverProjectId` used to throw, kept verbatim so the
+ * message an operator sees does not depend on which endpoint reported the failure.
+ */
+function onboardingFailureMessage(code: "no_endpoint" | "no_project"): string {
+  return code === "no_endpoint"
+    ? t("oauth.projectIdDiscoveryFailed", { detail: t("upstream.noEndpoint") })
+    : t("oauth.loadCodeAssistNoProject");
 }
 
 export async function accountsRoutes(app: FastifyInstance, deps: RouteDeps = {}): Promise<void> {
@@ -127,6 +158,7 @@ export async function accountsRoutes(app: FastifyInstance, deps: RouteDeps = {})
       return;
     }
 
+    let account: Account | undefined;
     try {
       const tokens = await exchangeCode({
         code,
@@ -139,38 +171,112 @@ export async function accountsRoutes(app: FastifyInstance, deps: RouteDeps = {})
         env: deps.env,
         fetchImpl: deps.fetchImpl,
       });
-      const project = await discoverProjectId(tokens.accessToken, {
-        env: deps.env,
-        fetchImpl: deps.fetchImpl,
-        userEmail: email,
-      });
-      const account = store.upsertAccount({
+      // Persisted before provisioning: login registers the account, onboarding provision
+      // it. A second phase Google demands later must find the account here, not as a
+      // thrown-away consent the operator has to redo (spec D6).
+      account = store.upsertAccount({
         id: `account-${randomBytes(8).toString("hex")}`,
         email: email ?? null,
         refreshToken: tokens.refreshToken,
         accessToken: tokens.accessToken,
         accessExpiresAt: tokens.expiresAt,
-        projectId: project.projectId,
+        projectId: null,
       });
-      // Login already has the tier in hand, so the first admin view is populated
-      // without waiting for the refresh cycle (spec D14).
-      store.setPaidTier(account.id, { id: project.paidTierId, name: project.paidTier });
-      // Seed the registry so `/v1/models` is not empty until the first refresh tick: the
-      // timer runs on QUOTA_REFRESH_TTL_MS (five minutes by default), and an empty model
-      // list reads as a broken deployment right after login. Best-effort -- the refresh
-      // cycle retries, and a login must not fail because a catalog read did.
-      const entries = await fetchAvailableModels({
-        accessToken: tokens.accessToken,
-        projectId: project.projectId,
-        env: deps.env,
-        fetchImpl: deps.fetchImpl,
-      }).catch(() => []);
-      if (entries.length > 0) applyCatalog(entries);
+      // `upsertAccount` leaves the row `active` with no project, which would make it routable
+      // until `onboard` records the real outcome — and forever if the process dies in between.
+      // Parking it here makes the pending state the starting state, not a side effect.
+      store.setStatus(account.id, "invalid", {
+        statusKind: "onboarding_pending",
+        lastError: t("account.notOnboarded", { id: account.id }),
+      });
+      // `onboard` applies every store effect itself (project, tier, status, catalog), so
+      // the reply only has to report the outcome it recorded. A null outcome means the
+      // account vanished between the upsert and the call, which the store treats as fatal.
+      const outcome = await resolveService().onboard(account.id);
+      if (!outcome) throw new Error(t("account.notFoundAfterUpsert", { id: account.id }));
+
+      if (outcome.status === "validation_required") {
+        // 202: the login is accepted and registered, the verification is still owed.
+        reply
+          .header("Location", `/admin/accounts/${account.id}/onboard`)
+          .status(202)
+          .send({
+            account: publicView(store.getAccount(account.id)),
+            onboarding: onboardingView(outcome),
+          });
+        return;
+      }
+
+      if (outcome.status === "failed") {
+        const mapped = toOpenAIErrorBody(new Error(onboardingFailureMessage(outcome.code)), 400);
+        reply.status(mapped.status).send(mapped.body);
+        return;
+      }
+
       // No top-level paidTier: the account object carries it as { id, name } (spec §9.1).
       reply.status(200).send({ account: publicView(store.getAccount(account.id)) });
     } catch (error) {
-      const mapped = toOpenAIErrorBody(error, 400);
+      // A dead refresh token is the one failure that escapes `onboard` (it records every
+      // onboarding outcome itself); the caller cannot fix it by editing the request.
+      // The row was inserted before provisioning, so record the verdict too: left on
+      // `onboarding_pending`, the admin surface keeps sending an operator to an onboarding
+      // link that cannot revive a revoked token.
+      if (account && error instanceof UpstreamError && error.kind === "auth") {
+        resolveService().applyFailure(account.id, error);
+      }
+      const mapped =
+        error instanceof UpstreamError && error.kind === "auth"
+          ? toOpenAIErrorBody(new Error(error.message), 502)
+          : toOpenAIErrorBody(error, 400);
       reply.status(mapped.status).send(mapped.body);
+    }
+  });
+
+  /**
+   * Resumes provisioning for an account that is registered but has no project yet (spec D6).
+   *
+   * Idempotent: a repeat answers the state the previous call left, so an operator who
+   * reloads the page, or a client that retried, needs no other endpoint. The service
+   * records the outcome as the account's state, which is why a failed outcome is a 502
+   * here: the wrapper could not reach Google, the request itself was fine.
+   */
+  app.post<{ Params: { id: string } }>("/admin/accounts/:id/onboard", async (request, reply) => {
+    const account = store.getAccount(request.params.id);
+    if (!account) return notFound(reply);
+
+    try {
+      const outcome = await resolveService().onboard(account.id);
+      if (!outcome) return notFound(reply);
+
+      if (outcome.status === "failed") {
+        const mapped = toOpenAIErrorBody(new Error(onboardingFailureMessage(outcome.code)), 502);
+        reply.status(mapped.status).send({
+          ...mapped.body,
+          account: publicView(store.getAccount(account.id)),
+          onboarding: onboardingView(outcome),
+        });
+        return;
+      }
+
+      reply.status(200).send({
+        account: publicView(store.getAccount(account.id)),
+        onboarding: onboardingView(outcome),
+      });
+    } catch (error) {
+      // A dead refresh token escapes `onboard`; nothing about the request is wrong, so it
+      // is a bad gateway rather than a bad request. The verdict is recorded as well: an
+      // account left on `validation_required` sends an operator to a link that cannot help.
+      if (error instanceof UpstreamError && error.kind === "auth") {
+        resolveService().applyFailure(account.id, error);
+      }
+      const mapped = toOpenAIErrorBody(
+        new Error(error instanceof Error ? error.message : String(error)),
+        502,
+      );
+      reply.status(mapped.status).send({
+        ...mapped.body,
+        account: publicView(store.getAccount(account.id)),
+      });
     }
   });
 
@@ -286,7 +392,17 @@ export async function accountsRoutes(app: FastifyInstance, deps: RouteDeps = {})
   });
 
   app.post<{ Params: { id: string } }>("/admin/accounts/:id/refresh", async (request, reply) => {
-    if (!store.getAccount(request.params.id)) return notFound(reply);
+    const account = store.getAccount(request.params.id);
+    if (!account) return notFound(reply);
+    // Provisioning owns the account until Google assigns a project, and the service would
+    // no-op silently: point at the route that finishes the job instead of reporting a
+    // refresh that read nothing. 400 rather than 409 because only 400/422/404/429 get a
+    // caller-facing `type` from `toOpenAIErrorBody`; a 409 would ship as `server_error`.
+    if (!account.projectId) {
+      const mapped = toOpenAIErrorBody(new Error(t("account.notOnboarded", { id: account.id })), 400);
+      reply.status(mapped.status).send(mapped.body);
+      return;
+    }
     try {
       await resolveService().refreshQuota(request.params.id);
       reply.status(200).send({ account: publicView(store.getAccount(request.params.id)) });

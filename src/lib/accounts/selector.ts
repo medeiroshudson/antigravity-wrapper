@@ -62,6 +62,10 @@ export function isEligibleForFamily(
   bucketIdPrefix: string | null,
   now: number,
 ): boolean {
+  // Onboarding writes `projectId` last: an account without one cannot build a request,
+  // so admitting it only burns a failover slot (and, while `status` is still `active`,
+  // it sorts first among unknown-quota accounts).
+  if (!account.projectId) return false;
   if (!account.enabled) return false;
   if (account.status === "invalid") return false;
   const quota = bucketIdPrefix === null ? null : summarizePrefix(account, bucketIdPrefix);

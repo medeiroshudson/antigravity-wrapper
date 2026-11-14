@@ -9,6 +9,7 @@ import {
   generatePkce,
   getUserEmail,
   loadCodeAssistInfo,
+  onboardAccount,
   onboardUser,
   refreshAccessToken,
 } from "../src/lib/antigravity/oauth.js";
@@ -348,6 +349,50 @@ describe("discoverProjectId", () => {
     ).rejects.toThrow(/authuser=hmedeiros\.ai\.004%40gmail\.com/);
   });
 
+  it("falls back to the localized reason when reasonMessage is an empty string", async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            ineligibleTiers: [
+              {
+                tierId: "free-tier",
+                reasonCode: "VALIDATION_REQUIRED",
+                reasonMessage: "",
+                validationUrl: "https://accounts.google.com/signin/continue?foo=bar",
+              },
+            ],
+          }),
+        ),
+    ) as unknown as typeof fetch;
+
+    // `""` must not become a user-visible empty reason: it falls back like a missing one.
+    await expect(
+      discoverProjectId("at", { env: ENV, fetchImpl, userEmail: "h@gmail.com" }),
+    ).rejects.toThrow(/Account validation required: .*authuser=h%40gmail\.com/);
+  });
+
+  it("falls back to the localized reason when reasonMessage is absent", async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            ineligibleTiers: [
+              {
+                tierId: "free-tier",
+                reasonCode: "VALIDATION_REQUIRED",
+                validationUrl: "https://accounts.google.com/signin/continue?foo=bar",
+              },
+            ],
+          }),
+        ),
+    ) as unknown as typeof fetch;
+
+    await expect(
+      discoverProjectId("at", { env: ENV, fetchImpl, userEmail: "h@gmail.com" }),
+    ).rejects.toThrow(/Account validation required: .*authuser=h%40gmail\.com/);
+  });
+
   it("does not call onboardUser if projectId is already present", async () => {
     let onboardCalled = false;
     const fetchImpl = vi.fn(async (url: string) => {
@@ -366,6 +411,86 @@ describe("discoverProjectId", () => {
     const out = await discoverProjectId("at", { env: ENV, fetchImpl });
     expect(out.projectId).toBe("already-present");
     expect(onboardCalled).toBe(false);
+  });
+});
+
+describe("onboardAccount", () => {
+  it("returns an active outcome with the project and the tier", async () => {
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          cloudaicompanionProject: "aicode-consumers",
+          paidTier: { id: "g1-pro-tier", name: "Google AI Pro" },
+        }),
+      ),
+    ) as unknown as typeof fetch;
+    const out = await onboardAccount("at", { env: ENV, fetchImpl });
+    expect(out).toEqual({
+      status: "active",
+      projectId: "aicode-consumers",
+      paidTierId: "g1-pro-tier",
+      paidTierName: "Google AI Pro",
+    });
+  });
+
+  it("returns validation_required with the email-enriched url instead of throwing", async () => {
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          ineligibleTiers: [
+            {
+              tierId: "free-tier",
+              reasonCode: "VALIDATION_REQUIRED",
+              reasonMessage: "Account verification required",
+              validationUrl: "https://accounts.google.com/signin/continue?foo=bar",
+            },
+          ],
+        }),
+      ),
+    ) as unknown as typeof fetch;
+    const out = await onboardAccount("at", { env: ENV, fetchImpl, userEmail: "h@gmail.com" });
+    expect(out.status).toBe("validation_required");
+    if (out.status !== "validation_required") throw new Error("unreachable");
+    expect(out.reason).toBe("Account verification required");
+    expect(out.validationUrl).toContain("authuser=h%40gmail.com");
+    expect(out.validationUrl).toContain("login_hint=h%40gmail.com");
+  });
+
+  it("returns failed/no_endpoint when no endpoint answers loadCodeAssist", async () => {
+    const fetchImpl = vi.fn(async () => new Response("upstream down", { status: 503 })) as unknown as typeof fetch;
+    expect(await onboardAccount("at", { env: ENV, fetchImpl })).toEqual({ status: "failed", code: "no_endpoint" });
+  });
+
+  it("reports no reason when the backend sends an empty reasonMessage", async () => {
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          ineligibleTiers: [
+            {
+              reasonCode: "VALIDATION_REQUIRED",
+              reasonMessage: "",
+              validationUrl: "https://accounts.google.com/signin/continue?foo=bar",
+            },
+          ],
+        }),
+      ),
+    ) as unknown as typeof fetch;
+    const out = await onboardAccount("at", { env: ENV, fetchImpl });
+    // A `202` body would otherwise carry an empty reason string, which reads as a
+    // missing field rather than as "upstream said nothing".
+    expect(out).toMatchObject({ status: "validation_required", reason: null });
+  });
+
+  it("returns failed/no_project when onboarding runs but no project appears", async () => {
+    const fetchImpl = vi.fn(async (url: string) =>
+      url.includes("onboardUser")
+        ? new Response(JSON.stringify({ name: "operations/1", done: false }))
+        : new Response(JSON.stringify({ allowedTiers: [{ id: "free-tier", isDefault: true }] })),
+    ) as unknown as typeof fetch;
+    expect(await onboardAccount("at", { env: ENV, fetchImpl, pollIntervalMs: 0 })).toEqual({
+      status: "failed",
+      code: "no_project",
+    });
   });
 });
 

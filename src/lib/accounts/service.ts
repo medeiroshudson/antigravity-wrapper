@@ -1,7 +1,7 @@
 import { getCooldownTransientMs } from "../../config/index.js";
 import { applyCatalog } from "../../config/models.js";
 import { t } from "../../i18n/index.js";
-import { loadCodeAssistInfo, refreshAccessToken } from "../antigravity/oauth.js";
+import { loadCodeAssistInfo, onboardAccount, refreshAccessToken, type OnboardingOutcome } from "../antigravity/oauth.js";
 import { fetchAvailableModels, retrieveUserQuotaSummary } from "../antigravity/quota.js";
 import { UpstreamError } from "../antigravity/errors.js";
 import { noopLogger, type Logger } from "../logger.js";
@@ -60,6 +60,64 @@ export class AccountService {
     return updated;
   }
 
+  /**
+   * Resumes onboarding for an account that is registered but not provisioned (spec D6).
+   *
+   * Login used to throw when Google had not assigned a project yet, leaving the operator
+   * to delete and re-add the account. Here the outcome is written as the account's state,
+   * so the pool's view and the endpoint's reply cannot disagree, and a `validation_required`
+   * reply hands back the link that finishes the job.
+   */
+  async onboard(id: string): Promise<OnboardingOutcome | null> {
+    const account = this.deps.store.getAccount(id);
+    if (!account) return null;
+    const fresh = await this.ensureFresh(account);
+    const accessToken = fresh.accessToken ?? "";
+    const outcome = await onboardAccount(accessToken, {
+      env: this.deps.env,
+      fetchImpl: this.deps.fetchImpl,
+      userEmail: fresh.email ?? undefined,
+    });
+
+    if (outcome.status === "active") {
+      this.deps.store.markOnboarded(id, {
+        projectId: outcome.projectId,
+        paidTierId: outcome.paidTierId,
+        paidTierName: outcome.paidTierName,
+      });
+      // Google provisioning the project is what makes the account usable; `markOnboarded`
+      // deliberately leaves `enabled` alone, so the release is explicit here — an account
+      // parked by an operator or by a TOS block must not stay out of the pool afterwards.
+      this.deps.store.setEnabled(id, true);
+      // Best-effort: the catalog read is a convenience, not a condition of onboarding.
+      const entries = await fetchAvailableModels({
+        accessToken,
+        projectId: outcome.projectId,
+        env: this.deps.env,
+        fetchImpl: this.deps.fetchImpl,
+      }).catch(() => []);
+      if (entries.length > 0) applyCatalog(entries);
+      return outcome;
+    }
+
+    if (outcome.status === "validation_required") {
+      this.deps.store.setStatus(id, "invalid", {
+        statusKind: "validation_required",
+        lastError: t("account.validationPending", { url: outcome.validationUrl }),
+      });
+      return outcome;
+    }
+
+    this.deps.store.setStatus(id, "invalid", {
+      statusKind: "onboarding_pending",
+      lastError: t("account.onboardingFailed", {
+        id,
+        detail: outcome.code === "no_endpoint" ? t("upstream.noEndpoint") : t("oauth.loadCodeAssistNoProject"),
+      }),
+    });
+    return outcome;
+  }
+
   async orderFor(runtimeModel: string): Promise<AccountSnapshot[]> {
     return order(this.deps.store.snapshot(), runtimeModel, this.now());
   }
@@ -105,7 +163,7 @@ export class AccountService {
         return;
       case "validation_required":
         this.deps.store.setStatus(id, "invalid", {
-          lastError: t("account.validationRequired"),
+          lastError: t("account.validationRequired", { id }),
           statusKind: "validation_required",
         });
         return;
@@ -144,6 +202,9 @@ export class AccountService {
   async refreshQuota(id: string): Promise<void> {
     const account = this.deps.store.getAccount(id);
     if (!account) return;
+    // Provisioning owns the account until it has a project (spec D6): there is nothing
+    // to read against, and spending a token refresh on it would be wasted work.
+    if (!account.projectId) return;
     const fresh = await this.ensureFresh(account);
     const accessToken = fresh.accessToken ?? "";
     const projectId = fresh.projectId ?? "";

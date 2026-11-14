@@ -296,7 +296,12 @@ export async function onboardUser(
   return { projectId: null };
 }
 
-export async function discoverProjectId(
+export type OnboardingOutcome =
+  | { status: "active"; projectId: string; paidTierId: string | null; paidTierName: string | null }
+  | { status: "validation_required"; validationUrl: string; reason: string | null }
+  | { status: "failed"; code: "no_endpoint" | "no_project" };
+
+export async function onboardAccount(
   accessToken: string,
   deps: {
     env?: NodeJS.ProcessEnv;
@@ -305,11 +310,16 @@ export async function discoverProjectId(
     pollIntervalMs?: number;
     pollAttempts?: number;
   } = {},
-): Promise<{ projectId: string; paidTier: string | null; paidTierId: string | null }> {
+): Promise<OnboardingOutcome> {
   let info = await loadCodeAssistInfo(accessToken, deps);
-  if (!info) throw new Error(t("oauth.projectIdDiscoveryFailed", { detail: t("upstream.noEndpoint") }));
+  if (!info) return { status: "failed", code: "no_endpoint" };
   if (info.projectId) {
-    return { projectId: info.projectId, paidTier: info.paidTierName, paidTierId: info.paidTierId };
+    return {
+      status: "active",
+      projectId: info.projectId,
+      paidTierId: info.paidTierId,
+      paidTierName: info.paidTierName,
+    };
   }
 
   const validationTier = info.ineligibleTiers.find(
@@ -327,8 +337,7 @@ export async function discoverProjectId(
         // ignore invalid url parsing
       }
     }
-    const reason = validationTier.reasonMessage || t("oauth.validationRequired", { detail: url });
-    throw new Error(`${reason} (${url})`);
+    return { status: "validation_required", validationUrl: url, reason: validationTier.reasonMessage || null };
   }
 
   const candidateTier =
@@ -339,7 +348,12 @@ export async function discoverProjectId(
 
   const onboardResult = await onboardUser(accessToken, candidateTier, deps);
   if (onboardResult.projectId) {
-    return { projectId: onboardResult.projectId, paidTier: info.paidTierName, paidTierId: info.paidTierId };
+    return {
+      status: "active",
+      projectId: onboardResult.projectId,
+      paidTierId: info.paidTierId,
+      paidTierName: info.paidTierName,
+    };
   }
 
   const pollAttempts = deps.pollAttempts ?? 3;
@@ -350,11 +364,41 @@ export async function discoverProjectId(
     }
     info = await loadCodeAssistInfo(accessToken, deps);
     if (info?.projectId) {
-      return { projectId: info.projectId, paidTier: info.paidTierName, paidTierId: info.paidTierId };
+      return {
+        status: "active",
+        projectId: info.projectId,
+        paidTierId: info.paidTierId,
+        paidTierName: info.paidTierName,
+      };
     }
   }
 
-  throw new Error(t("oauth.loadCodeAssistNoProject"));
+  return { status: "failed", code: "no_project" };
+}
+
+export async function discoverProjectId(
+  accessToken: string,
+  deps: {
+    env?: NodeJS.ProcessEnv;
+    fetchImpl?: typeof fetch;
+    userEmail?: string;
+    pollIntervalMs?: number;
+    pollAttempts?: number;
+  } = {},
+): Promise<{ projectId: string; paidTier: string | null; paidTierId: string | null }> {
+  const outcome = await onboardAccount(accessToken, deps);
+  if (outcome.status === "active") {
+    return { projectId: outcome.projectId, paidTier: outcome.paidTierName, paidTierId: outcome.paidTierId };
+  }
+  if (outcome.status === "validation_required") {
+    const reason = outcome.reason || t("oauth.validationRequired", { detail: outcome.validationUrl });
+    throw new Error(`${reason} (${outcome.validationUrl})`);
+  }
+  throw new Error(
+    outcome.code === "no_endpoint"
+      ? t("oauth.projectIdDiscoveryFailed", { detail: t("upstream.noEndpoint") })
+      : t("oauth.loadCodeAssistNoProject"),
+  );
 }
 
 /**

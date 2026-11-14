@@ -16,6 +16,7 @@ export type AccountStatusKind =
   | "auth"
   | "quota"
   | "rate_limited"
+  | "onboarding_pending"
   | "operator_disabled";
 
 /** The effective state, which is what an operator actually asks for. */
@@ -336,6 +337,25 @@ export class AccountStore {
     this.db
       .prepare("UPDATE accounts SET paid_tier_id = ?, paid_tier_name = ? WHERE id = ?")
       .run(tier.id, tier.name, id);
+  }
+
+  /**
+   * Records a completed onboarding as one write: the assigned project, both tier fields,
+   * and the state that being provisioned implies. One statement so a resumed account never
+   * reads as half-provisioned; clearing `status_kind` and `last_error` is what lets a
+   * re-onboarded account leave a recorded block behind (spec D7).
+   */
+  markOnboarded(
+    id: string,
+    input: { projectId: string; paidTierId: string | null; paidTierName: string | null },
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE accounts SET project_id = ?, paid_tier_id = ?, paid_tier_name = ?,
+           status = 'active', status_kind = NULL, cooldown_until = NULL, last_error = NULL
+         WHERE id = ?`,
+      )
+      .run(input.projectId, input.paidTierId, input.paidTierName, id);
   }
 
   setTokens(id: string, tokens: { accessToken: string; accessExpiresAt: number }): void {

@@ -57,6 +57,84 @@ describe("ensureFresh", () => {
   });
 });
 
+describe("onboard", () => {
+  function pendingAccount(id = "a1") {
+    return store.upsertAccount({
+      id,
+      email: `${id}@x.com`,
+      refreshToken: `r-${id}`,
+      accessToken: `a-${id}`,
+      accessExpiresAt: Date.now() + 3_600_000,
+      projectId: null,
+    });
+  }
+
+  it("onboard marks the account active and seeds the catalog when a project is assigned", async () => {
+    pendingAccount("a1");
+    store.setStatus("a1", "invalid", { statusKind: "validation_required", lastError: "pending" });
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (url.includes("fetchAvailableModels")) {
+        return new Response(JSON.stringify({ models: { "gemini-3.8-flash-low": { displayName: "Gemini 3.8 Flash (Low)" } } }));
+      }
+      return new Response(JSON.stringify({ cloudaicompanionProject: "aicode-consumers", paidTier: { id: "free-tier", name: "Free" } }));
+    }) as unknown as typeof fetch;
+    const service = new AccountService({ store, env: ENV, fetchImpl });
+
+    const outcome = await service.onboard("a1");
+
+    expect(outcome).toMatchObject({ status: "active", projectId: "aicode-consumers" });
+    expect(store.getAccount("a1")).toMatchObject({ projectId: "aicode-consumers", status: "active", statusKind: null });
+    // The catalog is fed from the same run, so the account's models are public immediately.
+    expect(getPublicModels().map((model) => model.id)).toContain("gemini-3.8-flash");
+  });
+
+  it("onboard records validation_required and keeps the account out of the pool", async () => {
+    pendingAccount("a1");
+    const fetchImpl = vi.fn(async () =>
+      new Response(JSON.stringify({ ineligibleTiers: [{ reasonCode: "VALIDATION_REQUIRED", validationUrl: "https://accounts.google.com/x" }] })),
+    ) as unknown as typeof fetch;
+    const service = new AccountService({ store, env: ENV, fetchImpl });
+
+    const outcome = await service.onboard("a1");
+
+    expect(outcome).toMatchObject({ status: "validation_required" });
+    expect(store.getAccount("a1")).toMatchObject({ status: "invalid", statusKind: "validation_required", projectId: null });
+    expect(store.getAccount("a1")?.lastError).toContain("https://accounts.google.com/x");
+  });
+
+  it("onboard records onboarding_pending when provisioning fails", async () => {
+    pendingAccount("a1");
+    const fetchImpl = vi.fn(async () => new Response("nope", { status: 503 })) as unknown as typeof fetch;
+    const service = new AccountService({ store, env: ENV, fetchImpl });
+
+    await service.onboard("a1");
+
+    expect(store.getAccount("a1")).toMatchObject({ status: "invalid", statusKind: "onboarding_pending" });
+  });
+
+  it("onboard returns null for an unknown account", async () => {
+    const service = new AccountService({ store, env: ENV });
+    expect(await service.onboard("nope")).toBeNull();
+  });
+
+  it("onboard re-enables an account an operator had parked", async () => {
+    pendingAccount("a1");
+    store.setEnabled("a1", false);
+    const fetchImpl = vi.fn(async (url: string) =>
+      url.includes("fetchAvailableModels")
+        ? new Response(JSON.stringify({ models: {} }))
+        : new Response(JSON.stringify({ cloudaicompanionProject: "aicode-consumers" })),
+    ) as unknown as typeof fetch;
+    const service = new AccountService({ store, env: ENV, fetchImpl });
+
+    await service.onboard("a1");
+
+    // Provisioned by Google means usable: a parked account would otherwise stay out
+    // of the pool with no reason left to show.
+    expect(store.getAccount("a1")?.enabled).toBe(true);
+  });
+});
+
 describe("applyFailure", () => {
   it("puts it on cooldown until resetTime on a quota wall", () => {
     seed();
@@ -434,6 +512,16 @@ describe("refreshQuota", () => {
     const line = lines.find((l) => l.msg === "token refresh failed");
     expect(line?.level).toBe("warn");
     expect(line?.obj.accountId).toBe("a1");
+  });
+
+  it("refreshQuota does nothing for an account without a projectId", async () => {
+    store.upsertAccount({ id: "a1", email: "a1@x.com", refreshToken: "r", accessToken: "t", accessExpiresAt: Date.now() + 3_600_000, projectId: null });
+    const fetchImpl = vi.fn(async () => new Response("{}")) as unknown as typeof fetch;
+    const service = new AccountService({ store, env: ENV, fetchImpl });
+
+    await service.refreshQuota("a1");
+
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
 
