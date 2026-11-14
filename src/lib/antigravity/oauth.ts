@@ -337,7 +337,7 @@ export async function onboardAccount(
         // ignore invalid url parsing
       }
     }
-    return { status: "validation_required", validationUrl: url, reason: validationTier.reasonMessage ?? null };
+    return { status: "validation_required", validationUrl: url, reason: validationTier.reasonMessage || null };
   }
 
   const candidateTier =

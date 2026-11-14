@@ -16,6 +16,7 @@ export type AccountStatusKind =
   | "auth"
   | "quota"
   | "rate_limited"
+  | "onboarding_pending"
   | "operator_disabled";
 
 /** The effective state, which is what an operator actually asks for. */

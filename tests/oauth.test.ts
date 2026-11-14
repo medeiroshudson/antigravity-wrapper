@@ -461,6 +461,26 @@ describe("onboardAccount", () => {
     expect(await onboardAccount("at", { env: ENV, fetchImpl })).toEqual({ status: "failed", code: "no_endpoint" });
   });
 
+  it("reports no reason when the backend sends an empty reasonMessage", async () => {
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          ineligibleTiers: [
+            {
+              reasonCode: "VALIDATION_REQUIRED",
+              reasonMessage: "",
+              validationUrl: "https://accounts.google.com/signin/continue?foo=bar",
+            },
+          ],
+        }),
+      ),
+    ) as unknown as typeof fetch;
+    const out = await onboardAccount("at", { env: ENV, fetchImpl });
+    // A `202` body would otherwise carry an empty reason string, which reads as a
+    // missing field rather than as "upstream said nothing".
+    expect(out).toMatchObject({ status: "validation_required", reason: null });
+  });
+
   it("returns failed/no_project when onboarding runs but no project appears", async () => {
     const fetchImpl = vi.fn(async (url: string) =>
       url.includes("onboardUser")

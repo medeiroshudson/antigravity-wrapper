@@ -30,7 +30,12 @@ const enUS = {
   "account.vanishedDuringRefresh": "account {id} vanished during refresh",
   "account.refreshFailed": "failed to renew the access token",
   "account.validationRequired":
-    "Account requires browser verification (VALIDATION_REQUIRED); retrying will not help.",
+    "Account requires browser verification (VALIDATION_REQUIRED). Open the validation link, then POST /admin/accounts/{id}/onboard to retry.",
+  "account.validationPending": "Browser verification required: {url}",
+  "account.onboardingFailed":
+    "Onboarding did not finish: {detail}. Retry with POST /admin/accounts/{id}/onboard.",
+  "account.notOnboarded":
+    "Account has no projectId yet: POST /admin/accounts/{id}/onboard continues onboarding.",
   "account.disabledByOperator": "disabled by operator",
   "account.tosBlocked":
     "Upstream blocked this account for a Terms of Service violation (403 TOS_VIOLATION). Appeal: {appeal}. It stays out of the pool until Google reinstates it and the account is re-onboarded.",
