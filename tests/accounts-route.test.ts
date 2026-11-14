@@ -373,6 +373,91 @@ describe("POST /admin/accounts/complete", () => {
     });
   }, 20_000);
 
+  it("parks the row as onboarding_pending before provisioning starts", async () => {
+    // `upsertAccount` writes the account `active` with no project. The window between that
+    // insert and the recorded outcome is the one moment a half-provisioned account could be
+    // routed (and a crash there would make it permanent), so the pending state must be the
+    // starting state, not something provisioning sets on its way out.
+    let duringProvisioning: { status: string; statusKind: string | null; projectId: string | null } | null =
+      null;
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const href = String(url);
+      if (href.includes("oauth2.googleapis.com/token")) {
+        return new Response(JSON.stringify({ access_token: "at", refresh_token: "rt", expires_in: 3600 }));
+      }
+      if (href.includes("userinfo")) {
+        return new Response(JSON.stringify({ email: "hmedeiros.ai.004@gmail.com" }));
+      }
+      if (href.includes("loadCodeAssist")) {
+        const row = store.listAccounts()[0];
+        duringProvisioning = row
+          ? { status: row.status, statusKind: row.statusKind, projectId: row.projectId }
+          : null;
+        return new Response(JSON.stringify({ cloudaicompanionProject: "aicode-consumers" }));
+      }
+      return new Response(JSON.stringify({}));
+    }) as unknown as typeof fetch;
+
+    app = buildServer("test-key", { store, env: ENV, fetchImpl, logger: false });
+    const start = await app.inject({ method: "POST", url: "/admin/accounts/start", headers: auth });
+    const { state } = start.json() as { state: string };
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/admin/accounts/complete",
+      headers: auth,
+      payload: { callbackUrl: `http://localhost:51121/oauth-callback?code=xyz&state=${state}` },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(duringProvisioning).toEqual({
+      status: "invalid",
+      statusKind: "onboarding_pending",
+      projectId: null,
+    });
+  });
+
+  it("records a dead refresh token instead of leaving the row claiming it is pending", async () => {
+    // The login succeeds but the access token arrives already expired, so the first
+    // provisioning read has to refresh — and Google answers that the refresh token is dead.
+    // `onboard` lets that error escape, so the route is the only place that can record it.
+    const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const href = String(url);
+      if (href.includes("oauth2.googleapis.com/token")) {
+        if (String(init?.body).includes("grant_type=refresh_token")) {
+          return new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 });
+        }
+        return new Response(JSON.stringify({ access_token: "at", refresh_token: "dead", expires_in: 0 }));
+      }
+      if (href.includes("userinfo")) {
+        return new Response(JSON.stringify({ email: "hmedeiros.ai.004@gmail.com" }));
+      }
+      return new Response(JSON.stringify({ cloudaicompanionProject: "aicode-consumers" }));
+    }) as unknown as typeof fetch;
+
+    app = buildServer("test-key", { store, env: ENV, fetchImpl, logger: false });
+    const start = await app.inject({ method: "POST", url: "/admin/accounts/start", headers: auth });
+    const { state } = start.json() as { state: string };
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/admin/accounts/complete",
+      headers: auth,
+      payload: { callbackUrl: `http://localhost:51121/oauth-callback?code=xyz&state=${state}` },
+    });
+
+    expect(response.statusCode).toBe(502);
+    // The row exists (it was parked before provisioning) and now carries the real verdict,
+    // so the admin surface names a re-login as the fix instead of another onboarding round.
+    const list = await app.inject({ method: "GET", url: "/admin/accounts", headers: auth });
+    expect(list.json().accounts[0]).toMatchObject({
+      status: "invalid",
+      statusKind: "auth",
+      projectId: null,
+      usable: false,
+    });
+  });
+
   it("rejects an unknown state", async () => {
     app = buildServer("test-key", { store, env: ENV, logger: false });
     const response = await app.inject({
@@ -500,8 +585,17 @@ describe("POST /admin/accounts/:id/onboard", () => {
 
     expect(res.statusCode).toBe(502);
     expect(res.json().error.message).toContain("Token exchange failed (400)");
-    // Nothing was written: the failure happened before the outcome could be recorded.
-    expect(store.getAccount("a1")?.statusKind).toBeNull();
+    // The verdict is recorded, not just reported: left on `validation_required` an operator
+    // keeps chasing an onboarding link that cannot revive a revoked token. `applyFailure`
+    // also throws away `onboarding_pending`, which is what the row held until provisioning
+    // ran.
+    const list = await app.inject({ method: "GET", url: "/admin/accounts", headers: auth });
+    expect(list.json().accounts[0]).toMatchObject({
+      status: "invalid",
+      statusKind: "auth",
+      projectId: null,
+      usable: false,
+    });
   });
 
   it("answers 404 for an unknown account on onboard", async () => {

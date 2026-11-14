@@ -319,7 +319,8 @@ curl -sS "$BASE/admin/accounts" -H "Authorization: Bearer $KEY"
   message lists each account's state.
 - **`403` with "valid license"** — the fingerprint `User-Agent` was not sent; it is a wrapper
   configuration fault, not the account's.
-- **`403` with `VALIDATION_REQUIRED`** — the account needs browser verification; logging in
-  again does not fix it.
+- **`403` with `VALIDATION_REQUIRED`** — the account needs browser verification. Logging in
+  again will not fix it: complete the link and then call
+  `POST /admin/accounts/<id>/onboard`, no new login needed.
 - **`429`** — the account hit its quota. The API puts the account in cooldown and tries the
   next one automatically; if all fail, the final error carries each one's reason.

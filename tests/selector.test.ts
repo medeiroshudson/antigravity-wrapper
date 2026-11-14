@@ -417,6 +417,19 @@ describe("isEligibleForFamily", () => {
     expect(isEligibleForFamily(cooling, null, NOW)).toBe(false);
   });
 
+  it("refuses an account whose project was never assigned, whatever its status says", () => {
+    // `complete` inserts the account before Google assigns a project, so a row can read
+    // `active` and enabled with `projectId` still null. It cannot build a request, so
+    // admitting it only burns a failover slot — and, while `status` is `active`, it sorts
+    // first among unknown-quota accounts, ahead of every account that can actually serve.
+    const pending = account({ id: "pending", projectId: null });
+    expect(isEligibleForFamily(pending, "gemini-", NOW)).toBe(false);
+    expect(isEligibleForFamily(pending, null, NOW)).toBe(false);
+    expect(
+      order([pending, account({ id: "ready" })], "gemini-3.8-flash-high", NOW).map((entry) => entry.id),
+    ).toEqual(["ready"]);
+  });
+
   it("maps models to bucket prefixes", () => {
     expect(familyBucketPrefix("gemini-3.8-flash")).toBe("gemini-");
     expect(familyBucketPrefix("claude-opus-4-6-thinking")).toBe("3p-");

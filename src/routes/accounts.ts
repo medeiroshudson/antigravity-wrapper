@@ -158,6 +158,7 @@ export async function accountsRoutes(app: FastifyInstance, deps: RouteDeps = {})
       return;
     }
 
+    let account: Account | undefined;
     try {
       const tokens = await exchangeCode({
         code,
@@ -173,13 +174,20 @@ export async function accountsRoutes(app: FastifyInstance, deps: RouteDeps = {})
       // Persisted before provisioning: login registers the account, onboarding provision
       // it. A second phase Google demands later must find the account here, not as a
       // thrown-away consent the operator has to redo (spec D6).
-      const account = store.upsertAccount({
+      account = store.upsertAccount({
         id: `account-${randomBytes(8).toString("hex")}`,
         email: email ?? null,
         refreshToken: tokens.refreshToken,
         accessToken: tokens.accessToken,
         accessExpiresAt: tokens.expiresAt,
         projectId: null,
+      });
+      // `upsertAccount` leaves the row `active` with no project, which would make it routable
+      // until `onboard` records the real outcome — and forever if the process dies in between.
+      // Parking it here makes the pending state the starting state, not a side effect.
+      store.setStatus(account.id, "invalid", {
+        statusKind: "onboarding_pending",
+        lastError: t("account.notOnboarded", { id: account.id }),
       });
       // `onboard` applies every store effect itself (project, tier, status, catalog), so
       // the reply only has to report the outcome it recorded. A null outcome means the
@@ -210,6 +218,12 @@ export async function accountsRoutes(app: FastifyInstance, deps: RouteDeps = {})
     } catch (error) {
       // A dead refresh token is the one failure that escapes `onboard` (it records every
       // onboarding outcome itself); the caller cannot fix it by editing the request.
+      // The row was inserted before provisioning, so record the verdict too: left on
+      // `onboarding_pending`, the admin surface keeps sending an operator to an onboarding
+      // link that cannot revive a revoked token.
+      if (account && error instanceof UpstreamError && error.kind === "auth") {
+        resolveService().applyFailure(account.id, error);
+      }
       const mapped =
         error instanceof UpstreamError && error.kind === "auth"
           ? toOpenAIErrorBody(new Error(error.message), 502)
@@ -250,7 +264,11 @@ export async function accountsRoutes(app: FastifyInstance, deps: RouteDeps = {})
       });
     } catch (error) {
       // A dead refresh token escapes `onboard`; nothing about the request is wrong, so it
-      // is a bad gateway rather than a bad request.
+      // is a bad gateway rather than a bad request. The verdict is recorded as well: an
+      // account left on `validation_required` sends an operator to a link that cannot help.
+      if (error instanceof UpstreamError && error.kind === "auth") {
+        resolveService().applyFailure(account.id, error);
+      }
       const mapped = toOpenAIErrorBody(
         new Error(error instanceof Error ? error.message : String(error)),
         502,

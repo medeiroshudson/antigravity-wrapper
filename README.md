@@ -482,7 +482,7 @@ curl -s -X POST http://127.0.0.1:3000/admin/accounts/account-3f2a91bc77de0d14/on
 | Answer | `onboarding.status` | Meaning |
 |---|---|---|
 | `200` | `active` | Google assigned the companion project. `account.projectId` is set, `status` is `active`, the account is back in the rotation, and the model catalog was seeded from it. |
-| `200` | `validation_required` | Google still wants the browser step. The body carries `onboarding.validationUrl` (and `reason`, when the backend sent one). Complete it and call again. |
+| `200` | `validation_required` | Google still wants the browser step. The body carries `onboarding.validationUrl` and `onboarding.reason` (`null` when the backend sent none). Complete it and call again. |
 | `502` | `failed` | No endpoint answered, or onboarding exhausted its polls — `onboarding.code` is `no_endpoint` or `no_project`. The account stays registered; retry later. |
 | `404` | — | Unknown account id. |
 
