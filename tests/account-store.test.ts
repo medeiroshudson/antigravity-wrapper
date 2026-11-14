@@ -310,6 +310,18 @@ describe("AccountStore", () => {
     });
   });
 
+  it("markOnboarded retires a recorded cooldown", () => {
+    store.upsertAccount({ id: "a1", email: "a1@x.com", refreshToken: "r", accessToken: "t", accessExpiresAt: 0, projectId: null });
+    store.setStatus("a1", "cooldown", { cooldownUntil: Date.now() + 60_000, statusKind: "quota", lastError: "quota wall" });
+    expect(store.getAccount("a1")?.cooldownUntil).not.toBeNull();
+
+    store.markOnboarded("a1", { projectId: "aicode-consumers", paidTierId: "free-tier", paidTierName: "Free" });
+
+    expect(store.getAccount("a1")).toMatchObject({
+      projectId: "aicode-consumers", status: "active", statusKind: null, cooldownUntil: null, lastError: null,
+    });
+  });
+
   it("consumes the pending OAuth exactly once", () => {
     store.savePendingOAuth("state-1", "verifier-1");
     expect(store.takePendingOAuth("state-1")?.verifier).toBe("verifier-1");
