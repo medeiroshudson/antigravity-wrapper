@@ -19,8 +19,8 @@ export const ENDPOINTS = [
  * environment with the last measured values as defaults, so the identity can follow a client
  * update without a release here.
  */
-export const DEFAULT_CLIENT_VERSION = "1.5.3";
-export const DEFAULT_CLIENT_BUILD = "1016078699";
+export const DEFAULT_CLIENT_VERSION = "1.5.9";
+export const DEFAULT_CLIENT_BUILD = "1021519450";
 
 /** `runtime.GOOS` spelling: the client is a Go binary and writes these names. */
 function platformName(): string {

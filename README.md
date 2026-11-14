@@ -1036,8 +1036,8 @@ is embedded in the code.
 | `ANTIGRAVITY_BASE_URL` | — | Override the upstream base; `https` only, host must be `*.googleapis.com` |
 | `ANTIGRAVITY_USER_AGENT` | — | Override the whole request fingerprint (wins over the five parts below) |
 | `ANTIGRAVITY_SUBCLIENT` | `cli` | Second segment of the fingerprint (the client passes `cli` or `hub`) |
-| `ANTIGRAVITY_CLIENT_VERSION` | `1.5.3` | Client version the fingerprint claims |
-| `ANTIGRAVITY_CLIENT_BUILD` | `1016078699` | Client `cl` (the language server's `--stamp` value) |
+| `ANTIGRAVITY_CLIENT_VERSION` | resolved at publish (`1.5.9`) | Client version the fingerprint claims |
+| `ANTIGRAVITY_CLIENT_BUILD` | resolved at publish (`1021519450`) | Client `cl` (the language server's `--stamp` value) |
 | `ANTIGRAVITY_AUTH_METHOD` | `consumer` | Last segment of the fingerprint |
 | `ANTIGRAVITY_UA_PRODUCT` | `antigravity` | First segment of the fingerprint |
 | `ANTIGRAVITY_SEARCH_AUTO` | `false` | Enable Google Search Grounding by default on all Gemini chat requests |
@@ -1186,21 +1186,35 @@ signed-in account's entitlement apply. `ANTIGRAVITY_USER_AGENT` overrides it if 
 to pin a different one.
 
 The value is built, not pinned, because both moving parts belong to the client. Captured
-from the installed CLI on 2026-11-09:
+from the installed CLI on 2026-11-14:
 
 ```text
-antigravity/cli/1.5.3 (aidev_client; os_type=darwin; arch=arm64; cl=1016078699; auth_method=consumer)
+antigravity/cli/1.5.9 (aidev_client; os_type=darwin; arch=arm64; cl=1021519450; auth_method=consumer)
 ```
 
 The shape is `<product>/<subclient>/<version> (aidev_client; os_type=…; arch=…; cl=…; auth_method=…)`.
 `os_type` and `arch` come from the running process (the client is a Go binary and writes
 `darwin`/`linux`/`windows` and `arm64`/`amd64`), so they follow the host instead of the
-`linux`/`armd64` pair an older release hardcoded. `version` and `cl` follow the client's own
-release — it self-updates (measured: 1.4.6 → 1.5.3 inside one session, with `cl` moving from
-`1005129088` to `1016078699`), so they are read from the environment with the last measured
-values as defaults. When the client moves, set `ANTIGRAVITY_CLIENT_VERSION` and
-`ANTIGRAVITY_CLIENT_BUILD`; `--stamp` on the language server prints the latter as
-`Built at CL: …`.
+`linux`/`armd64` pair an older release hardcoded.
+
+`version` and `cl` follow the client's release, which moves on its own: the CLI self-updated
+1.4.6 → 1.5.3 inside one session (`cl` 1005129088 → 1016078699), and stood at 1.5.9 /
+1021519450 five days later. Pinning them in code therefore goes stale silently, so the
+publish workflow resolves both from public sources before building:
+
+```text
+GET  <updater>/manifests/linux_amd64.json   -> { version, url, sha512 }
+GET  <url>                                  -> client tarball (one file: antigravity)
+sha512 must match; `cl` is read from the binary
+```
+
+`scripts/client-identity.mjs` implements that, and the result reaches the image as
+`ANTIGRAVITY_CLIENT_VERSION` / `_BUILD` build args (also recorded in the image labels). The
+script refuses an empty extraction and refuses a `cl` that does not move forward, so a
+manifest or binary-layout change fails the build instead of publishing a stale identity.
+`ANTIGRAVITY_CLIENT_VERSION` / `_BUILD` in the environment still win, which is the emergency
+override. The `cl` extraction is a heuristic validated against the two versions whose UA was
+observed; the definitive check remains running the client once and reading the header.
 
 ### Conversation identity
 

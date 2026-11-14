@@ -14,7 +14,15 @@ RUN npm run build
 
 FROM node:22-alpine AS runtime
 WORKDIR /app
-ENV NODE_ENV=production
+# Identity the upstream sees. Resolved at publish time from the public updater manifest
+# (scripts/client-identity.mjs); the values here are only the fallback for a local build.
+ARG ANTIGRAVITY_CLIENT_VERSION=1.5.9
+ARG ANTIGRAVITY_CLIENT_BUILD=1021519450
+ENV NODE_ENV=production \
+    ANTIGRAVITY_CLIENT_VERSION=$ANTIGRAVITY_CLIENT_VERSION \
+    ANTIGRAVITY_CLIENT_BUILD=$ANTIGRAVITY_CLIENT_BUILD
+LABEL dev.hmedeiros.antigravity.client-version=$ANTIGRAVITY_CLIENT_VERSION \
+      dev.hmedeiros.antigravity.client-build=$ANTIGRAVITY_CLIENT_BUILD
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
