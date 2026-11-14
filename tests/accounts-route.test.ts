@@ -273,7 +273,7 @@ describe("POST /admin/accounts/complete", () => {
     expect(body.account.projectId).toBe("aicode-consumers");
   });
 
-  it("surfaces validationUrl with userEmail parameters when VALIDATION_REQUIRED during complete", async () => {
+  it("answers 202 with the onboarding link and persists the pending account on VALIDATION_REQUIRED", async () => {
     const fetchImpl = vi.fn(async (url: string | URL | Request) => {
       const href = String(url);
       if (href.includes("oauth2.googleapis.com/token")) {
@@ -309,12 +309,69 @@ describe("POST /admin/accounts/complete", () => {
       headers: auth,
       payload: { callbackUrl: `http://localhost:51121/oauth-callback?code=xyz&state=${state}` },
     });
-    expect(response.statusCode).toBe(400);
-    const body = response.json() as { error: { message: string } };
-    expect(body.error.message).toContain("Terms acceptance required");
-    expect(body.error.message).toContain("authuser=hmedeiros.ai.004%40gmail.com");
-    expect(body.error.message).toContain("login_hint=hmedeiros.ai.004%40gmail.com");
+
+    // Login is not a dead end any more: the account is registered, the state records why
+    // it cannot serve, and the reply hands back the link that finishes the job (spec D6).
+    expect(response.statusCode).toBe(202);
+    const body = response.json() as {
+      account: { id: string; status: string; statusKind: string; email: string };
+      onboarding: { status: string; validationUrl: string; reason: string | null };
+    };
+    expect(body.onboarding.status).toBe("validation_required");
+    expect(body.onboarding.validationUrl).toContain("authuser=hmedeiros.ai.004%40gmail.com");
+    expect(body.onboarding.validationUrl).toContain("login_hint=hmedeiros.ai.004%40gmail.com");
+    expect(body.onboarding.reason).toBe("Terms acceptance required");
+    expect(body.account.statusKind).toBe("validation_required");
+    expect(response.headers.location).toBe(`/admin/accounts/${body.account.id}/onboard`);
+
+    const list = await app.inject({ method: "GET", url: "/admin/accounts", headers: auth });
+    expect(list.json().accounts).toHaveLength(1);
   });
+
+  // The provisioning poll waits 3 x 1.5 s before it gives up (onboardAccount's default),
+  // so this case needs more than vitest's 5 s default.
+  it("persists a pending account with 400 when provisioning finds no project", async () => {
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const href = String(url);
+      if (href.includes("oauth2.googleapis.com/token")) {
+        return new Response(JSON.stringify({ access_token: "at", refresh_token: "rt", expires_in: 3600 }));
+      }
+      if (href.includes("userinfo")) {
+        return new Response(JSON.stringify({ email: "hmedeiros.ai.004@gmail.com" }));
+      }
+      if (href.includes("onboardUser")) {
+        return new Response(JSON.stringify({}), { status: 500 });
+      }
+      if (href.includes("loadCodeAssist")) {
+        return new Response(JSON.stringify({ allowedTiers: [{ id: "free-tier", isDefault: true }] }));
+      }
+      return new Response(JSON.stringify({}));
+    }) as unknown as typeof fetch;
+
+    app = buildServer("test-key", { store, env: ENV, fetchImpl, logger: false });
+    const start = await app.inject({ method: "POST", url: "/admin/accounts/start", headers: auth });
+    const { state } = start.json() as { state: string };
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/admin/accounts/complete",
+      headers: auth,
+      payload: { callbackUrl: `http://localhost:51121/oauth-callback?code=xyz&state=${state}` },
+    });
+
+    // The account is kept even though provisioning failed: `onboard` is what retries it,
+    // so throwing the login away would force the operator to redo the OAuth consent.
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.message).toContain("loadCodeAssist returned no projectId");
+    const list = await app.inject({ method: "GET", url: "/admin/accounts", headers: auth });
+    expect(list.json().accounts).toHaveLength(1);
+    expect(list.json().accounts[0]).toMatchObject({
+      projectId: null,
+      status: "invalid",
+      statusKind: "onboarding_pending",
+      usable: false,
+    });
+  }, 20_000);
 
   it("rejects an unknown state", async () => {
     app = buildServer("test-key", { store, env: ENV, logger: false });
@@ -336,6 +393,187 @@ describe("POST /admin/accounts/complete", () => {
       payload: { callbackUrl: "http://localhost:51121/oauth-callback?state=x" },
     });
     expect(response.statusCode).toBe(400);
+  });
+});
+
+describe("POST /admin/accounts/:id/onboard", () => {
+  function seedPending(id = "a1") {
+    store.upsertAccount({
+      id,
+      email: `${id}@x.com`,
+      refreshToken: "r",
+      accessToken: "t",
+      accessExpiresAt: Date.now() + 3_600_000,
+      projectId: null,
+    });
+  }
+
+  /** loadCodeAssist answers a provisioned project; fetchAvailableModels answers one model. */
+  function provisionedFetch() {
+    return vi.fn(async (url: string | URL | Request) => {
+      const href = String(url);
+      if (href.includes("fetchAvailableModels")) {
+        return new Response(
+          JSON.stringify({
+            models: {
+              "gemini-3.8-flash-low": {
+                displayName: "Gemini 3.8 Flash (Low)",
+                maxTokens: 1_048_576,
+                maxOutputTokens: 65_536,
+                supportsThinking: true,
+                thinkingBudget: 1000,
+              },
+            },
+          }),
+        );
+      }
+      return new Response(
+        JSON.stringify({ cloudaicompanionProject: "aicode-consumers", paidTier: { id: "free-tier", name: "Antigravity Starter Quota" } }),
+      );
+    }) as unknown as typeof fetch;
+  }
+
+  it("resumes onboarding for a registered account and seeds the catalog", async () => {
+    seedPending();
+    store.setStatus("a1", "invalid", { statusKind: "validation_required", lastError: "pending" });
+    app = buildServer("test-key", { store, env: ENV, fetchImpl: provisionedFetch(), logger: false });
+
+    const res = await app.inject({ method: "POST", url: "/admin/accounts/a1/onboard", headers: auth });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({
+      account: { id: "a1", projectId: "aicode-consumers", status: "active", statusKind: null, usable: true },
+      onboarding: { status: "active", projectId: "aicode-consumers" },
+    });
+    // Task 3 seeds the registry inside `onboard`; the route must not do it a second time.
+    const models = await app.inject({ method: "GET", url: "/v1/models", headers: auth });
+    expect((models.json() as { data: Array<{ id: string }> }).data.map((m) => m.id)).toContain("gemini-3.8-flash");
+  });
+
+  it("answers 200 with the same link while Google still demands validation", async () => {
+    seedPending();
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            ineligibleTiers: [
+              {
+                tierId: "free-tier",
+                reasonCode: "VALIDATION_REQUIRED",
+                reasonMessage: "Terms acceptance required",
+                validationUrl: "https://accounts.google.com/signin/continue?flowName=GlifWebSignIn",
+              },
+            ],
+          }),
+        ),
+    ) as unknown as typeof fetch;
+    app = buildServer("test-key", { store, env: ENV, fetchImpl, logger: false });
+
+    const res = await app.inject({ method: "POST", url: "/admin/accounts/a1/onboard", headers: auth });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json().onboarding).toMatchObject({ status: "validation_required" });
+    expect(res.json().account.statusKind).toBe("validation_required");
+  });
+
+  it("answers 502 when the refresh token is dead", async () => {
+    // `onboard` deliberately lets `ensureFresh`'s `UpstreamError("auth")` escape: the
+    // request is fine, the account's credential is not, and only a re-login fixes it.
+    store.upsertAccount({
+      id: "a1",
+      email: "a1@x.com",
+      refreshToken: "dead",
+      accessToken: "expired",
+      accessExpiresAt: 0,
+      projectId: null,
+    });
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const href = String(url);
+      if (href.includes("oauth2.googleapis.com/token")) {
+        return new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 });
+      }
+      return new Response(JSON.stringify({ cloudaicompanionProject: "aicode-consumers" }));
+    }) as unknown as typeof fetch;
+    app = buildServer("test-key", { store, env: ENV, fetchImpl, logger: false });
+
+    const res = await app.inject({ method: "POST", url: "/admin/accounts/a1/onboard", headers: auth });
+
+    expect(res.statusCode).toBe(502);
+    expect(res.json().error.message).toContain("Token exchange failed (400)");
+    // Nothing was written: the failure happened before the outcome could be recorded.
+    expect(store.getAccount("a1")?.statusKind).toBeNull();
+  });
+
+  it("answers 404 for an unknown account on onboard", async () => {
+    app = buildServer("test-key", { store, env: ENV, logger: false });
+    const res = await app.inject({ method: "POST", url: "/admin/accounts/nope/onboard", headers: auth });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("answers 502 when no endpoint can be reached during onboarding", async () => {
+    seedPending();
+    const fetchImpl = vi.fn(async () => new Response("{}", { status: 503 })) as unknown as typeof fetch;
+    app = buildServer("test-key", { store, env: ENV, fetchImpl, logger: false });
+
+    const res = await app.inject({ method: "POST", url: "/admin/accounts/a1/onboard", headers: auth });
+
+    // The wrapper could not reach Google: that is a bad gateway, not a bad request.
+    expect(res.statusCode).toBe(502);
+    expect(res.json().onboarding).toMatchObject({ status: "failed", code: "no_endpoint" });
+    expect(res.json().error.message).toContain("Could not discover the projectId");
+    expect(res.json().account).toMatchObject({ id: "a1", projectId: null, statusKind: "onboarding_pending" });
+    expect(store.getAccount("a1")?.statusKind).toBe("onboarding_pending");
+  });
+
+  it("clears a recorded TOS block when onboarding finally assigns a project", async () => {
+    seedPending();
+    store.setStatus("a1", "invalid", { statusKind: "tos_blocked", lastError: "blocked" });
+    store.setEnabled("a1", false);
+    app = buildServer("test-key", { store, env: ENV, fetchImpl: provisionedFetch(), logger: false });
+
+    const res = await app.inject({ method: "POST", url: "/admin/accounts/a1/onboard", headers: auth });
+
+    // Provisioning the project is the way back from a block: the recorded kind and the
+    // operator's park both have to go, or the account stays out of the pool for ever.
+    expect(res.json().account).toMatchObject({ status: "active", statusKind: null, enabled: true, usable: true });
+    expect(store.getAccount("a1")?.lastError).toBeNull();
+  });
+
+  it("answers 200 on every concurrent resume without duplicating the account", async () => {
+    seedPending();
+    app = buildServer("test-key", { store, env: ENV, fetchImpl: provisionedFetch(), logger: false });
+
+    const [first, second] = await Promise.all([
+      app.inject({ method: "POST", url: "/admin/accounts/a1/onboard", headers: auth }),
+      app.inject({ method: "POST", url: "/admin/accounts/a1/onboard", headers: auth }),
+    ]);
+
+    expect([first.statusCode, second.statusCode]).toEqual([200, 200]);
+    const list = await app.inject({ method: "GET", url: "/admin/accounts", headers: auth });
+    expect(list.json().accounts).toHaveLength(1);
+  });
+});
+
+describe("POST /admin/accounts/:id/refresh", () => {
+  it("rejects a quota refresh for an account that was never onboarded", async () => {
+    store.upsertAccount({
+      id: "a1",
+      email: "a1@x.com",
+      refreshToken: "r",
+      accessToken: "t",
+      accessExpiresAt: Date.now() + 3_600_000,
+      projectId: null,
+    });
+    const fetchImpl = vi.fn(async () => new Response("{}")) as unknown as typeof fetch;
+    app = buildServer("test-key", { store, env: ENV, fetchImpl, logger: false });
+
+    const res = await app.inject({ method: "POST", url: "/admin/accounts/a1/refresh", headers: auth });
+
+    // 400, not 409: `toOpenAIErrorBody` only names a caller-facing `type` for 400/422/404/429,
+    // and this is a request the caller can fix by calling the onboarding route.
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.message).toContain("/admin/accounts/a1/onboard");
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
 
