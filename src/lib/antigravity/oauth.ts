@@ -391,7 +391,7 @@ export async function discoverProjectId(
     return { projectId: outcome.projectId, paidTier: outcome.paidTierName, paidTierId: outcome.paidTierId };
   }
   if (outcome.status === "validation_required") {
-    const reason = outcome.reason ?? t("oauth.validationRequired", { detail: outcome.validationUrl });
+    const reason = outcome.reason || t("oauth.validationRequired", { detail: outcome.validationUrl });
     throw new Error(`${reason} (${outcome.validationUrl})`);
   }
   throw new Error(

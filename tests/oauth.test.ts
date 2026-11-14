@@ -349,6 +349,50 @@ describe("discoverProjectId", () => {
     ).rejects.toThrow(/authuser=hmedeiros\.ai\.004%40gmail\.com/);
   });
 
+  it("falls back to the localized reason when reasonMessage is an empty string", async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            ineligibleTiers: [
+              {
+                tierId: "free-tier",
+                reasonCode: "VALIDATION_REQUIRED",
+                reasonMessage: "",
+                validationUrl: "https://accounts.google.com/signin/continue?foo=bar",
+              },
+            ],
+          }),
+        ),
+    ) as unknown as typeof fetch;
+
+    // `""` must not become a user-visible empty reason: it falls back like a missing one.
+    await expect(
+      discoverProjectId("at", { env: ENV, fetchImpl, userEmail: "h@gmail.com" }),
+    ).rejects.toThrow(/Account validation required: .*authuser=h%40gmail\.com/);
+  });
+
+  it("falls back to the localized reason when reasonMessage is absent", async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            ineligibleTiers: [
+              {
+                tierId: "free-tier",
+                reasonCode: "VALIDATION_REQUIRED",
+                validationUrl: "https://accounts.google.com/signin/continue?foo=bar",
+              },
+            ],
+          }),
+        ),
+    ) as unknown as typeof fetch;
+
+    await expect(
+      discoverProjectId("at", { env: ENV, fetchImpl, userEmail: "h@gmail.com" }),
+    ).rejects.toThrow(/Account validation required: .*authuser=h%40gmail\.com/);
+  });
+
   it("does not call onboardUser if projectId is already present", async () => {
     let onboardCalled = false;
     const fetchImpl = vi.fn(async (url: string) => {
