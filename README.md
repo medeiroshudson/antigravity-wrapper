@@ -350,6 +350,11 @@ not fail the login), and stores everything:
 }
 ```
 
+If Google requires a browser step before it assigns the project, the login answers
+**`202 Accepted`** instead of `200` and the account waits for
+`POST /admin/accounts/:id/onboard` — see
+[Automatic onboarding and account verification](#automatic-onboarding-and-account-verification).
+
 #### Effective state and its cause
 
 `status` alone does not answer "is this account serving?": it is the pool machine
@@ -360,7 +365,7 @@ operator reads `status: "active", enabled: false`. Two derived fields close that
 |---|---|
 | `state` | `active` \| `cooling` \| `invalid` \| `disabled` — derived from `status`, `enabled` and the cooldown. `invalid` outranks `disabled`, so an upstream refusal is never hidden by a parking decision. |
 | `usable` | `state === "active"`. An administrative answer, not a quota one: a usable account can still be out of quota for one model family. |
-| `statusKind` | Why, machine-readably: `tos_blocked` \| `validation_required` \| `auth` \| `quota` \| `rate_limited` \| `operator_disabled`, or `null`. |
+| `statusKind` | Why, machine-readably: `tos_blocked` \| `validation_required` \| `onboarding_pending` \| `auth` \| `quota` \| `rate_limited` \| `operator_disabled`, or `null`. |
 
 `statusKind` survives the action that follows it: disabling an account the upstream already
 blocked keeps `tos_blocked` (and its `lastError` with the appeal link) instead of overwriting
@@ -397,23 +402,31 @@ Google assigns companion projects (`cloudaicompanionProject`, typically `aicode-
    If an account has never run the Antigravity desktop IDE, Google responds to initial project discovery without a project ID. The wrapper detects this, identifies eligible tiers (`free-tier` or paid subscriptions), and calls `/v1internal:onboardUser` in the background. It polls the resulting operation until Google provisions the managed companion project. You do not need to install or run the Antigravity desktop application.
 
 2. **Account Validation and Terms Acceptance (`VALIDATION_REQUIRED`):**
-   When Google requires an account check (such as phone verification, terms acceptance, or robot check), the backend returns `ineligibleTiers` with reason code `VALIDATION_REQUIRED`. The wrapper intercepts this and returns HTTP 400 with the exact continuation link:
+   When Google requires an account check (such as phone verification, terms acceptance, or robot check), the backend returns `ineligibleTiers` with reason code `VALIDATION_REQUIRED`. The tokens are valid — only the companion project is missing — so the wrapper **registers the account anyway**, marks it `invalid` with `statusKind: "validation_required"`, and answers **`202 Accepted`** with the continuation link and a `Location` header naming the endpoint that resumes the work:
 
    ```json
    {
-     "error": {
-       "message": "Account validation required: ... (https://accounts.google.com/signin/continue?flowName=GlifWebSignIn&authuser=user%40gmail.com&login_hint=user%40gmail.com)",
-       "type": "invalid_request_error",
-       "param": null
+     "account": {
+       "id": "account-3f2a91bc77de0d14",
+       "email": "user@gmail.com",
+       "projectId": null,
+       "status": "invalid",
+       "state": "invalid",
+       "usable": false,
+       "statusKind": "validation_required"
+     },
+     "onboarding": {
+       "status": "validation_required",
+       "validationUrl": "https://accounts.google.com/signin/continue?flowName=GlifWebSignIn&authuser=user%40gmail.com&login_hint=user%40gmail.com",
+       "reason": "Terms acceptance required"
      }
    }
    ```
 
    **To unblock the account:**
-   - Copy the URL from the error message.
-   - Open it in your browser where that Google account is logged in. The URL includes `authuser` and `login_hint` to target the right profile.
+   - Open `onboarding.validationUrl` in your browser where that Google account is logged in. The URL includes `authuser` and `login_hint` to target the right profile.
    - Complete Google's prompt (accept terms or finish verification).
-   - Re-run the OAuth login flow (`/admin/accounts/start` and `/admin/accounts/complete`).
+   - Call `POST /admin/accounts/<id>/onboard` to resume provisioning. **No new login is needed** — the tokens from the first one are still valid.
 
 3. **Account blocked for a Terms of Service violation (`TOS_VIOLATION`):**
    Google suspends the account itself, and answers every generation request with `403 PERMISSION_DENIED`, `ErrorInfo.reason: "TOS_VIOLATION"` and an `appeal_url` in the metadata:
@@ -445,12 +458,42 @@ Google assigns companion projects (`cloudaicompanionProject`, typically `aicode-
    - marks the account `invalid` and records the appeal form in `lastError`, so it leaves the rotation instead of burning a failover slot on every later turn;
    - answers `403` with code `accounts_blocked` and the appeal link when **every** account of the pool is blocked, instead of blaming the requested model.
 
-   **To unblock:** submit the appeal at the `appeal_url`, and once Google reinstates the account re-run the OAuth login flow for it — re-onboarding resets the status to `active`.
+   **To unblock:** submit the appeal at the `appeal_url`, and once Google reinstates the account
+   call `POST /admin/accounts/<id>/onboard` for it — a completed onboarding resets the status to
+   `active` and puts the account back in the rotation, without a new login. If Google still
+   refuses, the next generation answers `403` and the block is recorded again.
 
    The quota summary keeps working while the account is blocked (the block applies to
    generation only), so `/admin/accounts/quota` still reads a healthy-looking quota for an
    account that cannot serve a single request. `status` and `lastError` are the fields that
    tell the two apart.
+
+### Resuming onboarding
+
+`POST /admin/accounts/:id/onboard` continues onboarding for an account that is already
+registered. It is idempotent and cheap to repeat: on an account that already has a project
+it is a single re-read, and it never calls `onboardUser` for one that does.
+
+```bash
+curl -s -X POST http://127.0.0.1:3000/admin/accounts/account-3f2a91bc77de0d14/onboard \
+  -H "Authorization: Bearer $API_KEY"
+```
+
+| Answer | `onboarding.status` | Meaning |
+|---|---|---|
+| `200` | `active` | Google assigned the companion project. `account.projectId` is set, `status` is `active`, the account is back in the rotation, and the model catalog was seeded from it. |
+| `200` | `validation_required` | Google still wants the browser step. The body carries `onboarding.validationUrl` (and `reason`, when the backend sent one). Complete it and call again. |
+| `502` | `failed` | No endpoint answered, or onboarding exhausted its polls — `onboarding.code` is `no_endpoint` or `no_project`. The account stays registered; retry later. |
+| `404` | — | Unknown account id. |
+
+`200` for `validation_required` is deliberate: the account is in a state you can act on, and
+the call itself did not fail.
+
+Provisioning state is never half-written. `projectId` is set only on success; until then the
+account reads `status: "invalid"` with `statusKind` = `onboarding_pending` (Google assigned no
+project) or `validation_required` (Google wants the browser step), which keeps it out of the
+rotation and out of the refresh loop. `POST /admin/accounts/:id/refresh` answers `400` for
+those accounts and names the endpoint to call instead.
 
 ### Error responses from this flow
 
@@ -461,8 +504,9 @@ Google assigns companion projects (`cloudaicompanionProject`, typically `aicode-
 | `400` `callbackUrl is not a valid URL` | Not parseable as a URL — usually a bare query string instead of the full URL |
 | `400` `callbackUrl is missing code or state` | URL parsed, but one of the two query parameters is absent |
 | `400` `state is unknown or expired; restart the login` | The `state` was already consumed, never existed, or passed its 5-minute TTL |
-| `400` + "Account validation required: ... (https://...)" | Google requires terms acceptance or verification. Open the URL in your browser, complete it, and retry. |
-| `400` `loadCodeAssist returned no projectId` | Automatic onboarding completed but Google did not assign a companion project to this account tier |
+| `202` + `onboarding.validationUrl` | Google requires terms acceptance or verification. The account is registered but not provisioned: open the URL, complete it, then call `POST /admin/accounts/<id>/onboard`. |
+| `400` `loadCodeAssist returned no projectId` | Onboarding ran but Google assigned no companion project. The account stays registered with `statusKind: "onboarding_pending"`; retry with `POST /admin/accounts/<id>/onboard`. |
+| `400` `Account has no projectId yet…` (from `/refresh`) | The account has not finished onboarding. Provisioning owns it until it has a project; use `/onboard`. |
 
 ---
 
@@ -562,6 +606,22 @@ quota snapshot:
 curl -s -X POST http://127.0.0.1:3000/admin/accounts/account-3f2a91bc77de0d14/refresh \
   -H "Authorization: Bearer $API_KEY"
 ```
+
+### Resume onboarding
+
+Registers nothing new — it finishes provisioning for an account that already exists, and it
+is the way back from `validation_required` and `onboarding_pending` without a new login:
+
+```bash
+curl -s -X POST http://127.0.0.1:3000/admin/accounts/account-3f2a91bc77de0d14/onboard \
+  -H "Authorization: Bearer $API_KEY"
+```
+
+`200` with `onboarding.status: "active"` (project assigned, account back in rotation) or
+`"validation_required"` (still wants the browser step; the body carries
+`onboarding.validationUrl`); `502` with `"failed"` when no endpoint answered or the polls ran
+out. The full contract is under
+[Resuming onboarding](#resuming-onboarding) in the login walkthrough.
 
 ### Recheck an account the upstream refused
 

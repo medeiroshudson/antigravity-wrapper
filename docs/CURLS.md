@@ -86,10 +86,31 @@ Paste the copied URL in place of `<CALLBACK_URL>`:
 curl -sS -X POST "$BASE/admin/accounts/complete" -H "Authorization: Bearer $KEY" -H 'content-type: application/json' -d '{"callbackUrl":"<CALLBACK_URL>"}'
 ```
 
-Response: `{"account":{...,"email":"hudson@gmail.com","projectId":"..."},"paidTier":"Google AI Pro"}`
+Response: `{"account":{...,"email":"hudson@gmail.com","projectId":"...","paidTier":{"id":"g1-pro-tier","name":"Google AI Pro"}}}`
 
-The email comes back in clear text and `paidTier` shows the subscription the account carries —
-if it comes back `null`, the account authenticated but has no paid tier associated.
+The email comes back in clear text and `account.paidTier` shows the subscription the account
+carries — if it comes back `null`, the account authenticated but has no paid tier associated.
+
+If Google wants a browser step before it assigns the project, this answers **`202`** instead,
+with `onboarding.validationUrl` and a `Location` header. Registering the account is not the
+same as provisioning it, and the second half has its own endpoint:
+[/admin/accounts/:id/onboard](#step-2b--resume-onboarding-if-google-asked-for-one).
+
+### Step 2b — resume onboarding (if Google asked for one)
+
+A `202` from step 2 means the account is registered but not provisioned. Open
+`onboarding.validationUrl` in the browser for that Google account, complete the prompt, then:
+
+```bash
+curl -sS -X POST "$BASE/admin/accounts/<ACCOUNT_ID>/onboard" -H "Authorization: Bearer $KEY"
+```
+
+`{"account":{...,"projectId":"aicode-consumers","status":"active"},"onboarding":{"status":"active","projectId":"aicode-consumers"}}`
+
+`onboarding.status` is `active` when Google assigned the project, and stays
+`validation_required` (still `200`) when it wants the browser step again. A `502` means no
+endpoint answered or the provisioning polls ran out — the account stays registered; retry.
+No new login is ever needed for this: the tokens from step 2 are still valid.
 
 ---
 
