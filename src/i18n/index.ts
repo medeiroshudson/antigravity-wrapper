@@ -77,6 +77,9 @@ const enUS = {
   "chat.streamWithoutFinishReason": "stream ended without finishReason",
   "chat.clientDisconnected": "client disconnected",
 
+  "warn.systemInstructionRelocated":
+    "The system instruction was moved, verbatim, to the first user turn: the upstream refuses this text in the system role (measured upstream defect), and the same text in the user role is accepted.",
+
   // --- search grounding ----------------------------------------------------
   "search.sources": "Fontes consultadas",
 

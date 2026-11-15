@@ -179,6 +179,30 @@ describe("TurnRunner", () => {
     expect(bodies[1]!.request.labels.last_step_index).toBe("0");
   });
 
+  it("relocates a known-refused system literal only with compatibility on", async () => {
+    const literal = "tools.opencode.session_move";
+    const bodies: Array<Record<string, any>> = [];
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, any>);
+      return sse(TEXT_SSE);
+    }) as unknown as typeof fetch;
+    const input = { ...BASE, systemInstruction: `catalog: ${literal}` };
+
+    const off = new TurnRunner({ accounts: service([snapshot("a1")]), fetchImpl });
+    await off.run(input);
+    expect(bodies[0]!.request.systemInstruction.parts[0].text).toContain(literal);
+
+    const on = new TurnRunner({
+      accounts: service([snapshot("a1")]),
+      fetchImpl,
+      env: { COMPATIBILITY: "on" },
+    });
+    const outcome = await on.run(input);
+    expect(bodies[1]!.request.systemInstruction.parts[0].text).toBe("");
+    expect(bodies[1]!.request.contents[0].parts[0].text).toContain("<system-instructions>");
+    expect(outcome.result.warnings?.some((w) => w.field === "system_instruction")).toBe(true);
+  });
+
   it("records an upstream TOS block against the account and fails over to the next one", async () => {
     // A blocked account must leave the rotation: while the block was classified as a
     // request verdict, the account stayed `active` and every later turn spent a failover

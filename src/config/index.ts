@@ -105,6 +105,16 @@ function nonNegativeInt(raw: string | undefined, fallback: number): number {
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
+/**
+ * Como aplicar as regras de compatibilidade com o upstream: `off` não avalia nada, `log`
+ * reporta o que faria sem mudar o request, `on` aplica. `log` existe para medir frequência
+ * antes de mudar comportamento.
+ */
+export function getCompatibilityMode(env: NodeJS.ProcessEnv = process.env): "off" | "log" | "on" {
+  const raw = env.COMPATIBILITY?.trim().toLowerCase();
+  return raw === "log" || raw === "on" ? raw : "off";
+}
+
 export function getDbPath(env: NodeJS.ProcessEnv = process.env): string {
   const value = env.DB_PATH?.trim();
   return value && value.length > 0 ? value : "./data/antigravity.db";

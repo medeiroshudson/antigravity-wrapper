@@ -175,6 +175,52 @@ describe("POST /v1/chat/completions", () => {
     expect(response.json().error.message).toMatch(/no account in the pool can serve it/i);
   });
 
+  it("serves the request when the refused literal is relocated in compatibility mode", async () => {
+    // The fake transport IS the measured backend: it refuses the literal inside the system
+    // instruction and accepts anything else. That makes this a contract test, not a stub.
+    const literal = "tools.opencode.session_move";
+    const backend = vi.fn(async (_url: string, init?: RequestInit) => {
+      const sent = JSON.parse(String(init?.body)) as {
+        request?: { systemInstruction?: { parts?: Array<{ text?: string }> } };
+      };
+      const system = sent.request?.systemInstruction?.parts?.[0]?.text ?? "";
+      if (system.includes(literal)) {
+        return new Response(
+          '{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}',
+          { status: 429 },
+        );
+      }
+      const body = new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(new TextEncoder().encode(TEXT_SSE));
+          c.close();
+        },
+      });
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    }) as unknown as typeof fetch;
+    seed("a2");
+
+    const payload = {
+      model: "gemini-3.8-flash",
+      messages: [
+        { role: "system", content: `catalog: ${literal}` },
+        { role: "user", content: "oi" },
+      ],
+    };
+
+    app = buildServer("test-key", { store, env: ENV, fetchImpl: backend, logger: false });
+    const off = await app.inject({ method: "POST", url: "/v1/chat/completions", headers: auth, payload });
+    expect(off.statusCode).toBe(400);
+    expect(off.json().error.code).toBe("upstream_refused_request");
+    await app.close();
+
+    app = buildServer("test-key", { store, env: { ...ENV, COMPATIBILITY: "on" }, fetchImpl: backend, logger: false });
+    const on = await app.inject({ method: "POST", url: "/v1/chat/completions", headers: auth, payload });
+    expect(on.statusCode).toBe(200);
+    expect(on.json().choices[0].message.content).toBe("ola");
+    expect(on.json().warnings?.some((w: { field: string }) => w.field === "system_instruction")).toBe(true);
+  });
+
   it("answers 400 upstream_refused_request when two accounts give the same refusal", async () => {
     // Measured 2026-11-15: a literal in the system instruction produced the same
     // RESOURCE_EXHAUSTED on every account. The caller must be told the request was

@@ -1099,6 +1099,7 @@ is embedded in the code.
 | `ANTIGRAVITY_CLIENT_VERSION` | resolved at publish (`1.5.9`) | Client version the fingerprint claims |
 | `ANTIGRAVITY_CLIENT_BUILD` | resolved at publish (`1021519450`) | Client `cl` (the language server's `--stamp` value) |
 | `ANTIGRAVITY_AUTH_METHOD` | `consumer` | Last segment of the fingerprint |
+| `COMPATIBILITY` | `off` | Compatibility rules for upstream refusals: `off`, `log` (report only) or `on` (apply) |
 | `ANTIGRAVITY_UA_PRODUCT` | `antigravity` | First segment of the fingerprint |
 | `ANTIGRAVITY_SEARCH_AUTO` | `false` | Enable Google Search Grounding by default on all Gemini chat requests |
 | `UPSTREAM_TIMEOUT_MS` | `120000` | Upstream request timeout |
@@ -1277,6 +1278,29 @@ manifest or binary-layout change fails the build instead of publishing a stale i
 `ANTIGRAVITY_CLIENT_VERSION` / `_BUILD` in the environment still win, which is the emergency
 override. The `cl` extraction is a heuristic validated against the two versions whose UA was
 observed; the definitive check remains running the client once and reading the header.
+
+### Compatibility rules
+
+Some refusals are about the *shape* of the request, not about the account or the model.
+Measured 2026-11-15, driving the service with opencode: a `systemInstruction` containing the
+literal `tools.opencode.session_move` answered `429 RESOURCE_EXHAUSTED` on every account,
+while the same text in the user role and 80k characters of neutral text answered `200`. The
+upstream status is the throttling one, so the pool first read it as quota and burned three
+accounts per request.
+
+`src/lib/chat/compatibility.ts` holds the rules that bridge that: each one names the measured
+literal, the action (relocate the system text, verbatim, to the first user turn), the
+evidence and the date it was measured. `COMPATIBILITY` selects the mode:
+
+- `off` (default) — no rule is evaluated;
+- `log` — reports `system instruction relocation candidate` with the rule id and size, and
+  changes nothing;
+- `on` — applies the first matching rule. The response carries a `warnings` entry with
+  `field: "system_instruction"` and the log records `system instruction relocated`.
+
+The text is never altered: it moves role, wrapped in `<system-instructions>`, and the empty
+system instruction is accepted by the backend (measured). Adding a rule without a fresh
+measurement is how a fix becomes a different symptom.
 
 ### Conversation identity
 

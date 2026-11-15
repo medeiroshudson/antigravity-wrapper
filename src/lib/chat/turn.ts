@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { getMaxFailoverAttempts } from "../../config/index.js";
+import { getCompatibilityMode, getMaxFailoverAttempts } from "../../config/index.js";
 import {
   getMaxOutputTokens,
   getModelEnum,
@@ -15,6 +15,7 @@ import {
   type GeminiContent,
 } from "../antigravity/envelope.js";
 import { ConversationRegistry } from "./identity.js";
+import { applyCompatibility } from "./compatibility.js";
 import { isDefinitive, ClientDisconnectedError, UpstreamError } from "../antigravity/errors.js";
 import { failureScope, refusalKey } from "../antigravity/scope.js";
 import { readSse, streamGenerate } from "../antigravity/rpc.js";
@@ -205,7 +206,17 @@ export class TurnRunner {
     // conversation is the one routing shape a human cannot produce.
     const key = this.identities.key(input.contents, input.systemInstruction);
     const conversation = this.identities.state(key);
-    const ordered = await this.deps.accounts.orderFor(input.runtimeModel);
+    // A chave da conversa é calculada sobre o input original; a compatibilidade age no que
+    // vai para o upstream, e o fingerprint descreve exatamente isso.
+    const compatibility = applyCompatibility(input, getCompatibilityMode(this.deps.env));
+    const wire = compatibility.input;
+    if (compatibility.hits.length > 0) {
+      this.logger.warn(
+        { runtimeModel: input.runtimeModel, hits: compatibility.hits, mode: getCompatibilityMode(this.deps.env) },
+        compatibility.hits.some((hit) => hit.applied) ? "system instruction relocated" : "system instruction relocation candidate",
+      );
+    }
+    const ordered = await this.deps.accounts.orderFor(wire.runtimeModel);
     const candidates = pinFirst(ordered, conversation.accountId);
     const limit = getMaxFailoverAttempts(this.deps.env);
     const failures: Array<{
@@ -232,7 +243,7 @@ export class TurnRunner {
     const tried = new Set<string>();
     // The same refusal, verbatim, from two accounts means the verdict is about the request.
     const verdicts = new Map<string, string>();
-    const fingerprint = requestFingerprint(input);
+    const fingerprint = requestFingerprint(wire);
 
     for (const candidate of candidates.slice(0, limit)) {
       if (tried.has(candidate.id)) continue;
@@ -249,12 +260,18 @@ export class TurnRunner {
         }
         this.deps.accounts.markUsed(candidate.id);
         const result = await this.runOnce(
-          input,
+          wire,
           fresh.accessToken ?? "",
           fresh.projectId,
           opts,
           conversation,
         );
+        if (compatibility.hits.some((hit) => hit.applied)) {
+          result.warnings = [
+            ...(result.warnings ?? []),
+            { field: "system_instruction", reason: t("warn.systemInstructionRelocated") },
+          ];
+        }
         this.identities.recordSuccess(key, candidate.id);
         return { result, accountId: candidate.id };
       } catch (error) {
