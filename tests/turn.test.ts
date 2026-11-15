@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ClientDisconnectedError } from "../src/lib/antigravity/errors.js";
-import { AllAccountsFailedError, TurnRunner } from "../src/lib/chat/turn.js";
+import { AllAccountsFailedError, RequestRefusedError, TurnRunner } from "../src/lib/chat/turn.js";
 import type { AccountService } from "../src/lib/accounts/service.js";
 import type { AccountSnapshot } from "../src/lib/accounts/store.js";
 import { captureLogger } from "./fixtures/logger.js";
@@ -296,34 +296,6 @@ describe("TurnRunner", () => {
     expect(accounts.applyFailure).not.toHaveBeenCalled();
   });
 
-  it("an abort during the transient backoff never issues the retry", async () => {
-    // The window between attempts: the client is already gone, so the retry would be a
-    // full upstream turn spent on a dead request.
-    const controller = new AbortController();
-    let calls = 0;
-    const fetchImpl = vi.fn(async () => {
-      calls += 1;
-      // Throttle the first attempt, then let the runner enter its backoff sleep.
-      if (calls === 1) {
-        controller.abort();
-        return new Response('{"error":{"message":"Resource has been exhausted (e.g. check quota)."}}', {
-          status: 429,
-        });
-      }
-      return sse(TEXT_SSE);
-    }) as unknown as typeof fetch;
-    const runner = new TurnRunner({
-      accounts: service([snapshot("a1")]),
-      fetchImpl,
-      env: { TRANSIENT_RETRY_BACKOFF_MS: "80" },
-    });
-
-    const error = await runner.run(BASE, { signal: controller.signal }).catch((e) => e);
-
-    expect(error).toBeInstanceOf(ClientDisconnectedError);
-    expect(calls).toBe(1);
-  });
-
   it("fails over to the next account when the first returns a 429 quota", async () => {
     // `streamGenerate` tries the three endpoints per account: the fake transport must
     // reject the ENTIRE first account (all endpoints) and only then accept the
@@ -414,11 +386,12 @@ describe("TurnRunner", () => {
     const accounts = service([snapshot("a1"), snapshot("a2")]);
     const runner = new TurnRunner({ accounts, fetchImpl });
 
-    await runner.run(BASE).catch(() => undefined);
+    const error = await runner.run(BASE).catch((e: unknown) => e);
 
-    // The account-level failure keeps its failover: this one is repairable by another
-    // account, unlike a missing model.
-    expect(accounts.applyFailure).toHaveBeenCalled();
+    // The identical refusal from two accounts is the request's verdict, not the pool's,
+    // and it parks nothing.
+    expect(error).toBeInstanceOf(RequestRefusedError);
+    expect(accounts.applyFailure).not.toHaveBeenCalled();
   });
 
   it("throws AllAccountsFailedError with each account's reason", async () => {
@@ -513,30 +486,60 @@ describe("TurnRunner", () => {
     expect((error as AllAccountsFailedError).failures[0]?.kind).toBe("server_error");
   });
 
-  it("retries the same account once after a transient 429, without cooling it down", async () => {
-    // A 429 no longer walks the endpoint ladder (measured: all three answered an
-    // identical throttle), so one throttled fetch exhausts one attempt and the
-    // account-level retry is the recovery.
+  it("does not retry the same account on an unattributed 429", async () => {
+    // A 429 with no reset hint is not evidence about the account, so the runner neither
+    // parks it nor spends a second call on it: one account, one answer.
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response('{"error":{"message":"Resource has been exhausted (e.g. check quota)."}}', {
+          status: 429,
+        }),
+    ) as unknown as typeof fetch;
+    const accounts = service([snapshot("a1")]);
+    const runner = new TurnRunner({ accounts, fetchImpl });
+
+    const error = await runner.run(BASE).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(AllAccountsFailedError);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(accounts.applyFailure).not.toHaveBeenCalled();
+  });
+
+  it("stops at the second identical refusal: the verdict is the request's, not the account's", async () => {
+    // Measured 2026-11-15: one literal in the system instruction answered
+    // 429 RESOURCE_EXHAUSTED on every account. Spending the pool on it produced six
+    // upstream calls and a "pool out of quota" the client then retried.
+    const body = '{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}';
+    const fetchImpl = vi.fn(async () => new Response(body, { status: 429 })) as unknown as typeof fetch;
+    const accounts = service([snapshot("a1"), snapshot("a2"), snapshot("a3")]);
+    const runner = new TurnRunner({ accounts, fetchImpl });
+
+    const error = await runner.run(BASE).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(RequestRefusedError);
+    expect((error as RequestRefusedError).accounts).toEqual(["a1", "a2"]);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    // A refusal that is not about the account must not park it.
+    expect(accounts.applyFailure).not.toHaveBeenCalled();
+  });
+
+  it("keeps failing over when the throttles differ", async () => {
+    // Different wording means different verdicts: the pool is still the right thing to
+    // walk, and the second account gets its chance.
     let calls = 0;
     const fetchImpl = vi.fn(async () => {
       calls += 1;
       return calls === 1
-        ? new Response('{"error":{"message":"Resource has been exhausted (e.g. check quota)."}}', {
-            status: 429,
-          })
+        ? new Response('{"error":{"message":"Resource has been exhausted (e.g. check quota)."}}', { status: 429 })
         : sse(TEXT_SSE);
     }) as unknown as typeof fetch;
-    const accounts = service([snapshot("a1")]);
-    const runner = new TurnRunner({
-      accounts,
-      fetchImpl,
-      env: { TRANSIENT_RETRY_BACKOFF_MS: "0" },
-    });
-    const { accountId, result } = await runner.run(BASE);
-    expect(accountId).toBe("a1");
-    expect(calls).toBe(2);
-    expect(result.content).toBe("ola");
-    // The throttle must not change the account's state (spec §11).
+    const accounts = service([snapshot("a1"), snapshot("a2")]);
+    const runner = new TurnRunner({ accounts, fetchImpl });
+
+    const { accountId } = await runner.run(BASE);
+
+    expect(accountId).toBe("a2");
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(accounts.applyFailure).not.toHaveBeenCalled();
   });
 
@@ -706,17 +709,20 @@ describe("TurnRunner logging", () => {
     expect(lines.some((l) => l.msg === "account attempt" && l.level === "debug")).toBe(true);
   });
 
-  it("applies cooldown failure and triggers refresh on transient rate limit", async () => {
+  it("parks nothing and refreshes nothing on an unattributed 429", async () => {
+    // The throttle is not this account's verdict: cooling it down made the pool look
+    // drained (the whole point of the 2026-11-15 investigation).
     const fetchImpl = vi.fn(
       async () => new Response('{"error":{"message":"Resource has been exhausted (e.g. check quota)."}}', { status: 429 }),
     ) as unknown as typeof fetch;
     const accounts = service([snapshot("a1")]);
-    const runner = new TurnRunner({ accounts, fetchImpl });
+    const { logger, lines } = captureLogger();
+    const runner = new TurnRunner({ accounts, fetchImpl, logger });
     await runner.run(BASE).catch(() => undefined);
-    expect(accounts.applyFailure).toHaveBeenCalledWith(
-      "a1",
-      expect.objectContaining({ kind: "transient_rate_limit", status: 429 }),
-    );
-    expect(accounts.refreshQuota).toHaveBeenCalledWith("a1");
+
+    expect(accounts.applyFailure).not.toHaveBeenCalled();
+    expect(accounts.refreshQuota).not.toHaveBeenCalled();
+    const failure = lines.find((l) => l.msg === "account failure");
+    expect(failure?.obj).toMatchObject({ kind: "transient_rate_limit", action: "none" });
   });
 });

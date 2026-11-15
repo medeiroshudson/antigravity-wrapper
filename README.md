@@ -1107,7 +1107,6 @@ is embedded in the code.
 | `QUOTA_REFRESH_TTL_MS` | `300000` | Quota snapshot TTL |
 | `MODELS_TTL_MS` | `14400000` | Model catalog TTL |
 | `COOLDOWN_TRANSIENT_MS` | `60000` | Fallback cooldown when a quota wall names no reset time |
-| `TRANSIENT_RETRY_BACKOFF_MS` | `1000` | Wait before retrying the same account after a transient throttle (`0` retries at once) |
 | `MAX_FAILOVER_ATTEMPTS` | `3` | Ceiling on accounts tried per request |
 | `BODY_LIMIT_BYTES` | `33554432` | Max request body in bytes before a `413`; raise it for very large turns |
 | `LOG_LEVEL` | `info` | Logger level. `info` shows one summary line per request; `debug` adds the per-attempt trace |
@@ -1183,12 +1182,15 @@ of the pool. Candidates are ordered like this:
 **Cooldown on a quota wall.** A `429` carrying a wall signal (`Resets in …`, quota
 exceeded) puts the account in `cooldown` until the reset time the backend named.
 
-**A transient `429` does neither.** Throttling that carries no wall signal — pressure on
-the backend, not an exhausted quota — leaves the pool untouched: the account stays
-eligible, the request retries it once after `TRANSIENT_RETRY_BACKOFF_MS`, and only then
-moves on. Cooling the account down instead would sideline a healthy account for the whole
-cooldown window, which with a one-account pool means every request answering `503` while
-its quota is still nearly full.
+**An unattributed `429` does neither, and is not retried on the same account.** Throttling
+that carries no wall signal — pressure on the backend, not an exhausted quota — leaves the
+account untouched: no cooldown, no second call. The request moves to the next account. If
+that account answers with the *same* refusal, the verdict belongs to the request and not to
+the pool: the runner stops there and answers `400` with code `upstream_refused_request`,
+quoting the upstream, because an unchanged payload would fail identically. Measured
+2026-11-15: one literal string inside a client's system instruction answered
+`429 RESOURCE_EXHAUSTED` on every account, which the old retry-plus-failover turned into six
+upstream calls and a `pool out of quota` the client then retried.
 
 **Failover only before the first byte.** The selector returns the whole ordered list and
 the transport walks it. While nothing has been written to the client, a recoverable

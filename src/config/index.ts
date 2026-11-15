@@ -143,14 +143,6 @@ export function getCooldownTransientMs(env: NodeJS.ProcessEnv = process.env): nu
   return positiveInt(env.COOLDOWN_TRANSIENT_MS, 60_000);
 }
 
-/**
- * Wait before retrying the same account after a transient throttle. Kept short:
- * the account is healthy and its quota intact, so the retry is cheap and the
- * alternative — switching accounts or waiting out a cooldown — costs far more.
- */
-export function getTransientRetryBackoffMs(env: NodeJS.ProcessEnv = process.env): number {
-  return nonNegativeInt(env.TRANSIENT_RETRY_BACKOFF_MS, 1_000);
-}
 
 /**
  * How long a `stream:true` request waits for the first content byte before the SSE

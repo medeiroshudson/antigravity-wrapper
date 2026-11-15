@@ -66,6 +66,8 @@ const enUS = {
     "Model '{model}' is unavailable: the account pool is out of quota for it. It clears in ~{reset}. Try another model.",
   "chat.poolEmptyNoReset":
     "Model '{model}' is unavailable: no account in the pool can serve it. Try another model.",
+  "chat.requestRefused":
+    "The upstream refused this request on {accounts} accounts with the same answer: {detail} The request itself is what it rejects; retrying it unchanged fails the same way.",
   "chat.poolAllBlocked":
     "All {accounts} account(s) in the pool are blocked upstream for a Terms of Service violation (403 TOS_VIOLATION). Appeal at {appeal}, then re-onboard the account or register a new one under /admin/accounts.",
   "chat.poolAllBlockedNoAppeal":

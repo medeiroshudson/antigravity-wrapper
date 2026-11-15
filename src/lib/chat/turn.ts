@@ -1,4 +1,5 @@
-import { getMaxFailoverAttempts, getTransientRetryBackoffMs } from "../../config/index.js";
+import { createHash } from "node:crypto";
+import { getMaxFailoverAttempts } from "../../config/index.js";
 import {
   getMaxOutputTokens,
   getModelEnum,
@@ -15,6 +16,7 @@ import {
 } from "../antigravity/envelope.js";
 import { ConversationRegistry } from "./identity.js";
 import { isDefinitive, ClientDisconnectedError, UpstreamError } from "../antigravity/errors.js";
+import { failureScope, refusalKey } from "../antigravity/scope.js";
 import { readSse, streamGenerate } from "../antigravity/rpc.js";
 import { noopLogger, type Logger } from "../logger.js";
 import { formatCitationsFooter, type GroundingMetadata } from "./grounding.js";
@@ -109,11 +111,6 @@ export interface TurnDeps {
  */
 const fatalAfterContent = new WeakSet<object>();
 
-/** Extra tries on the same account after a transient throttle, before switching. */
-const TRANSIENT_RETRIES = 1;
-
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
-
 /**
  * Maps the backend `finishReason` to the OpenAI vocabulary.
  * Unknown upstream reasons map to "stop" with a diagnostic warning.
@@ -133,10 +130,53 @@ export function mapFinishReason(raw: string | undefined): { reason: string; warn
 }
 
 /**
+ * The upstream refused this exact request on more than one account, with the same verdict.
+ *
+ * A verdict that does not change when the account changes is not about the account: it is
+ * about the request (or about a limit shared above the pool). Retrying the same payload —
+ * on this account, on the next one, or in the next request — fails identically, so the
+ * runner stops spending accounts on it. Measured 2026-11-15: a system instruction
+ * containing one literal string answered `429 RESOURCE_EXHAUSTED` on every account, which
+ * the pool turned into six upstream calls and a "pool out of quota" the client then retried.
+ */
+export class RequestRefusedError extends Error {
+  override name = "RequestRefusedError";
+  constructor(
+    readonly model: string,
+    readonly accounts: readonly string[],
+    readonly upstream: UpstreamError,
+    readonly fingerprint: string,
+  ) {
+    super(t("chat.requestRefused", { accounts: accounts.length, detail: upstream.message }));
+    Object.setPrototypeOf(this, RequestRefusedError.prototype);
+  }
+}
+
+/**
  * Runs a turn against the pool. Failover exists only BEFORE the first byte:
  * once the text starts flowing there is no way to switch accounts, and the
  * failure becomes a visible error (spec §6.3).
  */
+/**
+ * The parts of a request that decide what the upstream answers. Two turns with the same
+ * fingerprint are the same request, so a refusal that survives an account change is about
+ * the payload — not about the pool.
+ */
+function requestFingerprint(input: TurnInput): string {
+  return createHash("sha256")
+    .update(input.runtimeModel)
+    .update("\u0000")
+    .update(input.systemInstruction)
+    .update("\u0000")
+    .update(JSON.stringify(input.contents))
+    .update("\u0000")
+    .update(JSON.stringify(input.tools ?? null))
+    .update("\u0000")
+    .update(input.effort)
+    .digest("hex")
+    .slice(0, 16);
+}
+
 /** The account that served the previous turn goes first; the rest keeps its order. */
 function pinFirst<T extends { id: string }>(candidates: readonly T[], pinned: string | null): readonly T[] {
   if (pinned === null) return candidates;
@@ -168,7 +208,6 @@ export class TurnRunner {
     const ordered = await this.deps.accounts.orderFor(input.runtimeModel);
     const candidates = pinFirst(ordered, conversation.accountId);
     const limit = getMaxFailoverAttempts(this.deps.env);
-    const backoffMs = getTransientRetryBackoffMs(this.deps.env);
     const failures: Array<{
       accountId: string;
       kind: string;
@@ -191,36 +230,34 @@ export class TurnRunner {
     // rethrown once every account has failed with the same kind.
     let definitiveError: UpstreamError | null = null;
     const tried = new Set<string>();
+    // The same refusal, verbatim, from two accounts means the verdict is about the request.
+    const verdicts = new Map<string, string>();
+    const fingerprint = requestFingerprint(input);
 
     for (const candidate of candidates.slice(0, limit)) {
       if (tried.has(candidate.id)) continue;
       tried.add(candidate.id);
 
-      // A transient throttle earns the account one more try before the request
-      // moves on: the account is healthy and its quota intact, so switching away
-      // would spend the next account on a problem the first one does not have.
-      for (let attempt = 0; ; attempt += 1) {
-        // A client that already left cannot be served: check before every attempt, or
-        // the transient backoff and the account switch would spend full upstream turns
-        // on a dead request.
-        if (opts.signal?.aborted) throw new ClientDisconnectedError();
-        try {
-          this.logger.debug({ accountId: candidate.id, attempt }, "account attempt");
-          const fresh = await this.deps.accounts.ensureFresh(candidate);
-          if (!fresh.projectId) {
-            throw new UpstreamError("server_error", 0, t("chat.accountWithoutProjectId"));
-          }
-          this.deps.accounts.markUsed(candidate.id);
-          const result = await this.runOnce(
-            input,
-            fresh.accessToken ?? "",
-            fresh.projectId,
-            opts,
-            conversation,
-          );
-          this.identities.recordSuccess(key, candidate.id);
-          return { result, accountId: candidate.id };
-        } catch (error) {
+      // A client that already left cannot be served: the account switch would spend a
+      // full upstream turn on a dead request.
+      if (opts.signal?.aborted) throw new ClientDisconnectedError();
+      try {
+        this.logger.debug({ accountId: candidate.id }, "account attempt");
+        const fresh = await this.deps.accounts.ensureFresh(candidate);
+        if (!fresh.projectId) {
+          throw new UpstreamError("server_error", 0, t("chat.accountWithoutProjectId"));
+        }
+        this.deps.accounts.markUsed(candidate.id);
+        const result = await this.runOnce(
+          input,
+          fresh.accessToken ?? "",
+          fresh.projectId,
+          opts,
+          conversation,
+        );
+        this.identities.recordSuccess(key, candidate.id);
+        return { result, accountId: candidate.id };
+      } catch (error) {
           if (!(error instanceof UpstreamError)) throw error;
 
           // After the first content the answer is on the wire, so switching accounts is
@@ -240,19 +277,51 @@ export class TurnRunner {
               "account failure",
             );
             failures.push({ accountId: candidate.id, kind: error.kind, message: error.message });
-            break;
-          }
-
-          if (error.kind === "transient_rate_limit" && attempt < TRANSIENT_RETRIES) {
-            this.logger.debug(
-              { accountId: candidate.id, kind: error.kind, backoffMs },
-              "transient retry",
-            );
-            if (backoffMs > 0) await sleep(backoffMs);
             continue;
           }
 
-          this.deps.accounts.applyFailure(candidate.id, error);
+          // A throttle the backend does not attribute (no reset hint) is not evidence about
+          // this account, so it changes no state: the account is not parked, and the next
+          // account gets a try. If that next account answers with the same refusal, the
+          // verdict is about the request, and another account would only repeat it.
+          if (error.kind === "transient_rate_limit") {
+            const verdict = refusalKey(error);
+            const previous = verdicts.get(verdict);
+            if (previous !== undefined && previous !== candidate.id) {
+              this.logger.warn(
+                {
+                  runtimeModel: input.runtimeModel,
+                  fingerprint,
+                  accounts: [previous, candidate.id],
+                  kind: error.kind,
+                  status: error.status,
+                },
+                "request refused by upstream",
+              );
+              throw new RequestRefusedError(
+                input.runtimeModel,
+                [previous, candidate.id],
+                error,
+                fingerprint,
+              );
+            }
+            verdicts.set(verdict, candidate.id);
+            this.logger.warn(
+              { accountId: candidate.id, kind: error.kind, status: error.status, action: "none" },
+              "account failure",
+            );
+            failures.push({
+              accountId: candidate.id,
+              kind: error.kind,
+              message: error.message,
+              retryAfterMs: error.retryAfterMs,
+            });
+            continue;
+          }
+
+          if (failureScope(error) === "account") {
+            this.deps.accounts.applyFailure(candidate.id, error);
+          }
           this.logger.warn(
             {
               accountId: candidate.id,
@@ -283,10 +352,8 @@ export class TurnRunner {
             retryAfterMs: error.retryAfterMs,
             appealUrl: error.appealUrl,
           });
-          break;
         }
       }
-    }
 
     // A pool failure is only right when the accounts disagree. When every account rejected
     // the request with the same definitive error -- a model absent from all of them -- that

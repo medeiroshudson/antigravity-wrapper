@@ -175,6 +175,31 @@ describe("POST /v1/chat/completions", () => {
     expect(response.json().error.message).toMatch(/no account in the pool can serve it/i);
   });
 
+  it("answers 400 upstream_refused_request when two accounts give the same refusal", async () => {
+    // Measured 2026-11-15: a literal in the system instruction produced the same
+    // RESOURCE_EXHAUSTED on every account. The caller must be told the request was
+    // refused, not that the pool ran out of quota.
+    seed("a2");
+    const body =
+      '{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}';
+    const refused = vi.fn(async () => new Response(body, { status: 429 })) as unknown as typeof fetch;
+    app = buildServer("test-key", { store, env: ENV, fetchImpl: refused, logger: false });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: auth,
+      payload: { model: "gemini-3.8-flash", messages: [{ role: "user", content: "oi" }] },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error).toMatchObject({ code: "upstream_refused_request" });
+    expect(response.json().error.message).toMatch(/refused this request on 2 accounts/i);
+    // Two accounts, not six calls, and neither account is parked.
+    expect(refused).toHaveBeenCalledTimes(2);
+    expect(store.getAccount("a1")?.status).toBe("active");
+  });
+
   it("answers 403 accounts_blocked, naming the appeal, when every account is blocked upstream", async () => {
     const blocked = vi.fn(async () => new Response(TOS_VIOLATION_BODY, { status: 403 })) as unknown as typeof fetch;
     app = buildServer("test-key", { store, env: ENV, fetchImpl: blocked, logger: false });

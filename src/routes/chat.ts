@@ -12,7 +12,7 @@ import { t } from "../i18n/index.js";
 import type { AccountStore } from "../lib/accounts/store.js";
 import { AccountService } from "../lib/accounts/service.js";
 import { ClientDisconnectedError, isDefinitive, isPoolRateLimited, UpstreamError } from "../lib/antigravity/errors.js";
-import { AllAccountsFailedError, TurnRunner } from "../lib/chat/turn.js";
+import { AllAccountsFailedError, RequestRefusedError, TurnRunner } from "../lib/chat/turn.js";
 import { getConversationRegistry } from "../lib/chat/identity.js";
 import { toResetPhrase } from "../lib/format/datetime.js";
 import { toContents, type ChatMessage } from "../lib/chat/compose.js";
@@ -140,6 +140,13 @@ function mapTurnError(
       new Error(t("chat.modelRejected", { model, detail: error.message })),
       status,
     ) as { status: number; body: { error: unknown } };
+  }
+  if (error instanceof RequestRefusedError) {
+    // The upstream answered the same way on more than one account: the payload is what it
+    // refuses. Never a pool verdict, and never retryable — the same request fails again.
+    return toOpenAIErrorBody(new Error(error.message), 400, {
+      code: "upstream_refused_request",
+    }) as { status: number; body: { error: unknown } };
   }
   if (
     error instanceof AllAccountsFailedError &&
