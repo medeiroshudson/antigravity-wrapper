@@ -96,7 +96,6 @@ const enUS = {
   "oauth.loadCodeAssistFailed": "loadCodeAssist responded {status}",
   "oauth.loadCodeAssistNoProject": "loadCodeAssist returned no projectId",
   "oauth.projectIdDiscoveryFailed": "Could not discover the projectId: {detail}",
-  "oauth.validationRequired": "Account validation required: {detail}",
 
   // --- diagnostic warnings -------------------------------------------------
   "warn.ignoredField": "Field '{field}' is not supported upstream and was ignored",

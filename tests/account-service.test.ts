@@ -55,6 +55,49 @@ describe("ensureFresh", () => {
     expect(account.accessToken).toBe("novo");
     expect(store.getAccount("a1")?.accessToken).toBe("novo");
   });
+
+  it("classes a revoked grant as an auth failure", async () => {
+    seed("a1", { accessExpiresAt: Date.now() - 1000 });
+    const fetchImpl = vi.fn(
+      async () => new Response('{"error":"invalid_grant"}', { status: 400 }),
+    ) as unknown as typeof fetch;
+    const service = new AccountService({ store, env: ENV, fetchImpl });
+    await expect(service.ensureFresh(store.getAccount("a1")!)).rejects.toMatchObject({ kind: "auth" });
+  });
+
+  it("classes a 401 from the token endpoint as an auth failure", async () => {
+    seed("a1", { accessExpiresAt: Date.now() - 1000 });
+    const fetchImpl = vi.fn(
+      async () => new Response('{"error":"unauthorized_client"}', { status: 401 }),
+    ) as unknown as typeof fetch;
+    const service = new AccountService({ store, env: ENV, fetchImpl });
+    await expect(service.ensureFresh(store.getAccount("a1")!)).rejects.toMatchObject({ kind: "auth" });
+  });
+
+  it("classes a 200 without an access token as a dead credential, not an outage", async () => {
+    seed("a1", { accessExpiresAt: Date.now() - 1000 });
+    const fetchImpl = vi.fn(
+      async () => new Response(JSON.stringify({ expires_in: 3600 })),
+    ) as unknown as typeof fetch;
+    const service = new AccountService({ store, env: ENV, fetchImpl });
+    // Nothing to retry: a body with no token cannot recover, so it must park the account
+    // instead of spending a token call on every request forever.
+    await expect(service.ensureFresh(store.getAccount("a1")!)).rejects.toMatchObject({ kind: "auth" });
+  });
+
+  it("classes a token-endpoint outage as a server error, not a dead credential", async () => {
+    seed("a1", { accessExpiresAt: Date.now() - 1000 });
+    const fetchImpl = vi.fn(
+      async () => new Response("upstream down", { status: 503 }),
+    ) as unknown as typeof fetch;
+    const service = new AccountService({ store, env: ENV, fetchImpl });
+    // A Google blip must not read as "this account's token is dead": `server_error` still
+    // fails the request over to the next account, but `applyFailure` leaves its state alone.
+    await expect(service.ensureFresh(store.getAccount("a1")!)).rejects.toMatchObject({
+      kind: "server_error",
+    });
+    expect(store.getAccount("a1")?.status).toBe("active");
+  });
 });
 
 describe("onboard", () => {
@@ -185,6 +228,26 @@ describe("applyFailure", () => {
     const service = new AccountService({ store, env: ENV });
     service.applyFailure("a1", new UpstreamError("auth", 401, "expired"));
     expect(store.getAccount("a1")?.status).toBe("invalid");
+  });
+
+  it("keeps a recorded TOS block when the credential fails too, stacking the note once", () => {
+    seed();
+    store.setStatus("a1", "invalid", {
+      statusKind: "tos_blocked",
+      lastError: "blocked for a Terms of Service violation; appeal at https://forms.gle/x",
+    });
+    const service = new AccountService({ store, env: ENV });
+    const error = new UpstreamError("auth", 401, "Token exchange failed (400): invalid_grant");
+
+    service.applyFailure("a1", error);
+    service.applyFailure("a1", error);
+
+    const account = store.getAccount("a1");
+    // The appeal link is the only local copy of an upstream verdict; a dead token must not
+    // erase it, and a retry must not duplicate the note.
+    expect(account?.statusKind).toBe("tos_blocked");
+    expect(account?.lastError).toContain("appeal at https://forms.gle/x");
+    expect(account?.lastError?.match(/invalid_grant/g)?.length).toBe(1);
   });
 
   it("does not change the state on a 403 license error (wrapper failure, not the account's)", () => {

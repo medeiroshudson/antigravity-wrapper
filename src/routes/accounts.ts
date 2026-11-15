@@ -10,6 +10,7 @@ import {
   exchangeCode,
   generatePkce,
   getUserEmail,
+  onboardingFailureMessage,
   type OnboardingOutcome,
 } from "../lib/antigravity/oauth.js";
 import { toIsoUtc, toResetPhrase } from "../lib/format/datetime.js";
@@ -82,16 +83,6 @@ function onboardingView(outcome: OnboardingOutcome): Record<string, unknown> {
     default:
       return { status: outcome.status, code: outcome.code };
   }
-}
-
-/**
- * The two failure sentences `discoverProjectId` used to throw, kept verbatim so the
- * message an operator sees does not depend on which endpoint reported the failure.
- */
-function onboardingFailureMessage(code: "no_endpoint" | "no_project"): string {
-  return code === "no_endpoint"
-    ? t("oauth.projectIdDiscoveryFailed", { detail: t("upstream.noEndpoint") })
-    : t("oauth.loadCodeAssistNoProject");
 }
 
 export async function accountsRoutes(app: FastifyInstance, deps: RouteDeps = {}): Promise<void> {
@@ -224,10 +215,15 @@ export async function accountsRoutes(app: FastifyInstance, deps: RouteDeps = {})
       if (account && error instanceof UpstreamError && error.kind === "auth") {
         resolveService().applyFailure(account.id, error);
       }
-      const mapped =
-        error instanceof UpstreamError && error.kind === "auth"
-          ? toOpenAIErrorBody(new Error(error.message), 502)
-          : toOpenAIErrorBody(error, 400);
+      // Every UpstreamError out of `onboard` is about the account or the upstream, never
+      // about the request the caller sent: the sibling `:id/onboard` catch answers 502 for
+      // the same failure, and a `server_error` must not surface as a 400 here.
+      // The token endpoint's own status must not become the admin status: a `401` there is
+      // a client-secret fault, not the caller's missing API key, and `detectStatus` would
+      // read `TokenRequestError.status` and pass it through.
+      const mapped = error instanceof UpstreamError
+        ? toOpenAIErrorBody(new Error(error.message), 502)
+        : toOpenAIErrorBody(new Error(error instanceof Error ? error.message : String(error)), 400);
       reply.status(mapped.status).send(mapped.body);
     }
   });

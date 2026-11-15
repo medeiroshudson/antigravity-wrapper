@@ -4,7 +4,6 @@ import {
   REDIRECT_URI,
   SCOPES,
   buildAuthUrl,
-  discoverProjectId,
   exchangeCode,
   generatePkce,
   getUserEmail,
@@ -242,178 +241,6 @@ describe("onboardUser", () => {
   });
 });
 
-describe("discoverProjectId", () => {
-  it("extracts the projectId and the tier, still returning the name", async () => {
-    const fetchImpl = vi.fn(
-      async () =>
-        new Response(
-          JSON.stringify({
-            cloudaicompanionProject: "aicode-consumers",
-            currentTier: { id: "free-tier", name: "Antigravity" },
-            paidTier: { id: "g1-pro-tier", name: "Google AI Pro" },
-          }),
-        ),
-    ) as unknown as typeof fetch;
-    const out = await discoverProjectId("at", { env: ENV, fetchImpl });
-    expect(out.projectId).toBe("aicode-consumers");
-    expect(out.paidTier).toBe("Google AI Pro");
-    // New: the id is no longer discarded (spec D15).
-    expect(out.paidTierId).toBe("g1-pro-tier");
-  });
-
-  it("still throws when no projectId can be found", async () => {
-    const fetchImpl = vi.fn(
-      async () => new Response(JSON.stringify({ paidTier: { id: "free-tier" } })),
-    ) as unknown as typeof fetch;
-    // The login path's contract is unchanged: a login without a project is a failed
-    // login, even though the tier reader tolerates the same payload.
-    await expect(discoverProjectId("at", { env: ENV, fetchImpl, pollIntervalMs: 0 })).rejects.toThrow();
-  });
-
-  it("auto-onboards account when projectId is missing initially", async () => {
-    let onboardCalled = false;
-    const fetchImpl = vi.fn(async (url: string) => {
-      if (url.includes("onboardUser")) {
-        onboardCalled = true;
-        return new Response(JSON.stringify({ cloudaicompanionProject: "aicode-consumers" }), { status: 200 });
-      }
-      return new Response(
-        JSON.stringify({
-          allowedTiers: [{ id: "free-tier", isDefault: true }],
-          paidTier: { id: "free-tier", name: "Free Tier" },
-        }),
-        { status: 200 },
-      );
-    }) as unknown as typeof fetch;
-
-    const out = await discoverProjectId("at", { env: ENV, fetchImpl });
-    expect(onboardCalled).toBe(true);
-    expect(out.projectId).toBe("aicode-consumers");
-    expect(out.paidTier).toBe("Free Tier");
-    expect(out.paidTierId).toBe("free-tier");
-  });
-
-  it("polls loadCodeAssist when onboardUser returns LRO without immediate project", async () => {
-    let loadCount = 0;
-    const fetchImpl = vi.fn(async (url: string) => {
-      if (url.includes("onboardUser")) {
-        return new Response(JSON.stringify({ name: "operations/123", done: false }), { status: 200 });
-      }
-      loadCount++;
-      if (loadCount === 1) {
-        return new Response(
-          JSON.stringify({
-            allowedTiers: [{ id: "free-tier", isDefault: true }],
-          }),
-          { status: 200 },
-        );
-      }
-      return new Response(
-        JSON.stringify({
-          cloudaicompanionProject: "aicode-consumers",
-          paidTier: { id: "free-tier", name: "Free Tier" },
-        }),
-        { status: 200 },
-      );
-    }) as unknown as typeof fetch;
-
-    const out = await discoverProjectId("at", { env: ENV, fetchImpl, pollIntervalMs: 0 });
-    expect(loadCount).toBeGreaterThanOrEqual(2);
-    expect(out.projectId).toBe("aicode-consumers");
-  });
-
-  it("throws informative error with validationUrl containing authuser and login_hint on VALIDATION_REQUIRED", async () => {
-    const fetchImpl = vi.fn(
-      async () =>
-        new Response(
-          JSON.stringify({
-            ineligibleTiers: [
-              {
-                tierId: "free-tier",
-                reasonCode: "VALIDATION_REQUIRED",
-                reasonMessage: "Account verification required",
-                validationUrl: "https://accounts.google.com/signin/continue?foo=bar",
-              },
-            ],
-          }),
-          { status: 200 },
-        ),
-    ) as unknown as typeof fetch;
-
-    await expect(
-      discoverProjectId("at", {
-        env: ENV,
-        fetchImpl,
-        userEmail: "hmedeiros.ai.004@gmail.com",
-      }),
-    ).rejects.toThrow(/authuser=hmedeiros\.ai\.004%40gmail\.com/);
-  });
-
-  it("falls back to the localized reason when reasonMessage is an empty string", async () => {
-    const fetchImpl = vi.fn(
-      async () =>
-        new Response(
-          JSON.stringify({
-            ineligibleTiers: [
-              {
-                tierId: "free-tier",
-                reasonCode: "VALIDATION_REQUIRED",
-                reasonMessage: "",
-                validationUrl: "https://accounts.google.com/signin/continue?foo=bar",
-              },
-            ],
-          }),
-        ),
-    ) as unknown as typeof fetch;
-
-    // `""` must not become a user-visible empty reason: it falls back like a missing one.
-    await expect(
-      discoverProjectId("at", { env: ENV, fetchImpl, userEmail: "h@gmail.com" }),
-    ).rejects.toThrow(/Account validation required: .*authuser=h%40gmail\.com/);
-  });
-
-  it("falls back to the localized reason when reasonMessage is absent", async () => {
-    const fetchImpl = vi.fn(
-      async () =>
-        new Response(
-          JSON.stringify({
-            ineligibleTiers: [
-              {
-                tierId: "free-tier",
-                reasonCode: "VALIDATION_REQUIRED",
-                validationUrl: "https://accounts.google.com/signin/continue?foo=bar",
-              },
-            ],
-          }),
-        ),
-    ) as unknown as typeof fetch;
-
-    await expect(
-      discoverProjectId("at", { env: ENV, fetchImpl, userEmail: "h@gmail.com" }),
-    ).rejects.toThrow(/Account validation required: .*authuser=h%40gmail\.com/);
-  });
-
-  it("does not call onboardUser if projectId is already present", async () => {
-    let onboardCalled = false;
-    const fetchImpl = vi.fn(async (url: string) => {
-      if (url.includes("onboardUser")) {
-        onboardCalled = true;
-      }
-      return new Response(
-        JSON.stringify({
-          cloudaicompanionProject: "already-present",
-          paidTier: { id: "g1-pro-tier", name: "Pro" },
-        }),
-        { status: 200 },
-      );
-    }) as unknown as typeof fetch;
-
-    const out = await discoverProjectId("at", { env: ENV, fetchImpl });
-    expect(out.projectId).toBe("already-present");
-    expect(onboardCalled).toBe(false);
-  });
-});
-
 describe("onboardAccount", () => {
   it("returns an active outcome with the project and the tier", async () => {
     const fetchImpl = vi.fn(async () =>
@@ -491,6 +318,65 @@ describe("onboardAccount", () => {
       status: "failed",
       code: "no_project",
     });
+  });
+  it("onboards through onboardUser when the account has no project yet", async () => {
+    let onboardCalled = false;
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (url.includes("onboardUser")) {
+        onboardCalled = true;
+        return new Response(JSON.stringify({ cloudaicompanionProject: "aicode-consumers" }));
+      }
+      return new Response(
+        JSON.stringify({ allowedTiers: [{ id: "free-tier", isDefault: true }], paidTier: { id: "free-tier", name: "Free Tier" } }),
+      );
+    }) as unknown as typeof fetch;
+
+    const out = await onboardAccount("at", { env: ENV, fetchImpl });
+
+    expect(onboardCalled).toBe(true);
+    expect(out).toEqual({
+      status: "active",
+      projectId: "aicode-consumers",
+      paidTierId: "free-tier",
+      paidTierName: "Free Tier",
+    });
+  });
+
+  it("polls loadCodeAssist when onboardUser answers an operation without the project", async () => {
+    let loadCount = 0;
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (url.includes("onboardUser")) {
+        return new Response(JSON.stringify({ name: "operations/123", done: false }));
+      }
+      loadCount++;
+      return new Response(
+        JSON.stringify(
+          loadCount === 1
+            ? { allowedTiers: [{ id: "free-tier", isDefault: true }] }
+            : { cloudaicompanionProject: "aicode-consumers", paidTier: { id: "free-tier", name: "Free Tier" } },
+        ),
+      );
+    }) as unknown as typeof fetch;
+
+    const out = await onboardAccount("at", { env: ENV, fetchImpl, pollIntervalMs: 0 });
+
+    expect(loadCount).toBeGreaterThanOrEqual(2);
+    expect(out).toMatchObject({ status: "active", projectId: "aicode-consumers" });
+  });
+
+  it("never calls onboardUser when the project is already assigned", async () => {
+    let onboardCalled = false;
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (url.includes("onboardUser")) onboardCalled = true;
+      return new Response(
+        JSON.stringify({ cloudaicompanionProject: "already-present", paidTier: { id: "g1-pro-tier", name: "Pro" } }),
+      );
+    }) as unknown as typeof fetch;
+
+    const out = await onboardAccount("at", { env: ENV, fetchImpl });
+
+    expect(out).toMatchObject({ status: "active", projectId: "already-present" });
+    expect(onboardCalled).toBe(false);
   });
 });
 

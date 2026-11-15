@@ -1,7 +1,14 @@
 import { getCooldownTransientMs } from "../../config/index.js";
 import { applyCatalog } from "../../config/models.js";
 import { t } from "../../i18n/index.js";
-import { loadCodeAssistInfo, onboardAccount, refreshAccessToken, type OnboardingOutcome } from "../antigravity/oauth.js";
+import {
+  loadCodeAssistInfo,
+  onboardAccount,
+  refreshAccessToken,
+  TokenRequestError,
+  TokenResponseError,
+  type OnboardingOutcome,
+} from "../antigravity/oauth.js";
 import { fetchAvailableModels, retrieveUserQuotaSummary } from "../antigravity/quota.js";
 import { UpstreamError } from "../antigravity/errors.js";
 import { noopLogger, type Logger } from "../logger.js";
@@ -41,12 +48,20 @@ export class AccountService {
       });
     } catch (error) {
       this.logger.warn({ accountId: account.id }, "token refresh failed");
-      // A dead refresh is a classified authentication failure, not a generic
-      // error: this way the runner marks the account `invalid` and moves on to
-      // the next candidate (spec §11), instead of aborting the whole request with 502.
+      // A revoked grant is a classified authentication failure: the runner marks the
+      // account `invalid` and moves on to the next candidate (spec §11) instead of
+      // aborting the whole request. Anything else — a timeout, a `5xx`, a rate limit on
+      // the token endpoint — is an outage, not this account's verdict: marking it `auth`
+      // parked working accounts over a Google blip.
+      // 403 is Google refusing the grant for a disabled or deleted user: still this
+      // credential, not the endpoint.
+      const revoked =
+        error instanceof TokenResponseError ||
+        (error instanceof TokenRequestError &&
+          (error.status === 400 || error.status === 401 || error.status === 403));
       throw new UpstreamError(
-        "auth",
-        401,
+        revoked ? "auth" : "server_error",
+        revoked ? 401 : 502,
         error instanceof Error ? error.message : t("account.refreshFailed"),
       );
     }
@@ -168,6 +183,25 @@ export class AccountService {
         });
         return;
       case "auth":
+        // A recorded block is the only local copy of an upstream account verdict and of its
+        // appeal link, and nothing about a token failure reproduces it. Keep the block and
+        // stack the credential note on it instead of replacing the whole record.
+        {
+          const current = this.deps.store.getAccount(id);
+          if (current?.statusKind === "tos_blocked") {
+            const note = current.lastError ?? "";
+            this.deps.store.setStatus(id, "invalid", {
+              statusKind: "tos_blocked",
+              lastError:
+                note.length === 0
+                  ? error.message
+                  : note.includes(error.message)
+                    ? note
+                    : `${note} | ${error.message}`,
+            });
+            return;
+          }
+        }
         this.deps.store.setStatus(id, "invalid", { lastError: error.message, statusKind: "auth" });
         return;
       case "account_blocked":

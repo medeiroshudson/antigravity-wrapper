@@ -45,6 +45,37 @@ export function buildAuthUrl(clientId: string, state: string, challenge: string)
   return `${AUTH_URL}?${params.toString()}`;
 }
 
+/**
+ * A token-endpoint refusal that keeps the HTTP status, so a caller can tell a revoked grant
+ * (`400 invalid_grant`, `401`) from an outage (`429`, `5xx`) without parsing the message.
+ * Without it every refresh failure looked like a dead credential, and a Google blip parked a
+ * working account as `invalid` / `auth`.
+ */
+export class TokenRequestError extends Error {
+  override name = "TokenRequestError";
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    Object.setPrototypeOf(this, TokenRequestError.prototype);
+  }
+}
+
+/**
+ * A token endpoint that answered `200` with nothing usable — invalid JSON, or no
+ * `access_token`. Not an HTTP refusal, but still this credential's problem rather than an
+ * outage: classifying it as `server_error` would retry a refresh token that cannot recover,
+ * forever, without ever parking the account.
+ */
+export class TokenResponseError extends Error {
+  override name = "TokenResponseError";
+  constructor(message: string) {
+    super(message);
+    Object.setPrototypeOf(this, TokenResponseError.prototype);
+  }
+}
+
 async function postToken(
   body: Record<string, string>,
   fetchImpl: typeof fetch,
@@ -58,14 +89,23 @@ async function postToken(
   });
   const text = await response.text();
   if (!response.ok) {
-    throw new Error(t("oauth.tokenExchangeFailed", { status: response.status, detail: redact(text).slice(0, 300) }));
+    throw new TokenRequestError(
+      response.status,
+      t("oauth.tokenExchangeFailed", { status: response.status, detail: redact(text).slice(0, 300) }),
+    );
   }
   // A 2xx that is not JSON also needs redaction: the JSON.parse error would echo
   // provider bytes without going through `redact`.
   try {
-    return JSON.parse(text) as Record<string, unknown>;
+    const parsed = JSON.parse(text) as unknown;
+    // `JSON.parse("null")` succeeds and yields `null`; reading a token off it would throw a
+    // `TypeError` that no caller can classify as this credential's problem.
+    if (typeof parsed !== "object" || parsed === null) {
+      throw new Error("not an object");
+    }
+    return parsed as Record<string, unknown>;
   } catch {
-    throw new Error(t("oauth.tokenResponseNotJson", { detail: redact(text).slice(0, 300) }));
+    throw new TokenResponseError(t("oauth.tokenResponseNotJson", { detail: redact(text).slice(0, 300) }));
   }
 }
 
@@ -118,7 +158,7 @@ export async function refreshAccessToken(input: {
   );
   const accessToken = data.access_token;
   if (typeof accessToken !== "string" || accessToken.length === 0) {
-    throw new Error(t("oauth.refreshMissingAccessToken"));
+    throw new TokenResponseError(t("oauth.refreshMissingAccessToken"));
   }
   const expiresIn = typeof data.expires_in === "number" ? data.expires_in : 3600;
   return { accessToken, expiresAt: Date.now() + expiresIn * 1000 - REFRESH_SKEW_MS };
@@ -376,29 +416,15 @@ export async function onboardAccount(
   return { status: "failed", code: "no_project" };
 }
 
-export async function discoverProjectId(
-  accessToken: string,
-  deps: {
-    env?: NodeJS.ProcessEnv;
-    fetchImpl?: typeof fetch;
-    userEmail?: string;
-    pollIntervalMs?: number;
-    pollAttempts?: number;
-  } = {},
-): Promise<{ projectId: string; paidTier: string | null; paidTierId: string | null }> {
-  const outcome = await onboardAccount(accessToken, deps);
-  if (outcome.status === "active") {
-    return { projectId: outcome.projectId, paidTier: outcome.paidTierName, paidTierId: outcome.paidTierId };
-  }
-  if (outcome.status === "validation_required") {
-    const reason = outcome.reason || t("oauth.validationRequired", { detail: outcome.validationUrl });
-    throw new Error(`${reason} (${outcome.validationUrl})`);
-  }
-  throw new Error(
-    outcome.code === "no_endpoint"
-      ? t("oauth.projectIdDiscoveryFailed", { detail: t("upstream.noEndpoint") })
-      : t("oauth.loadCodeAssistNoProject"),
-  );
+/**
+ * The sentence the login route answers `400` with when onboarding finds no project. It used to
+ * live in `discoverProjectId`'s `throw`; keeping it here means the route and any future caller
+ * cannot word the same failure differently.
+ */
+export function onboardingFailureMessage(code: "no_endpoint" | "no_project"): string {
+  return code === "no_endpoint"
+    ? t("oauth.projectIdDiscoveryFailed", { detail: t("upstream.noEndpoint") })
+    : t("oauth.loadCodeAssistNoProject");
 }
 
 /**

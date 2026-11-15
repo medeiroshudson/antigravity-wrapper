@@ -373,6 +373,64 @@ describe("POST /admin/accounts/complete", () => {
     });
   }, 20_000);
 
+  it("does not let the token endpoint's 401 become the login's status", async () => {
+    // A wrong ANTIGRAVITY_CLIENT_SECRET makes Google answer 401. Passing that through would
+    // tell the admin client its API key is wrong, which is the opposite diagnosis.
+    const fetchImpl = vi.fn(
+      async () => new Response('{"error":"invalid_client"}', { status: 401 }),
+    ) as unknown as typeof fetch;
+
+    app = buildServer("test-key", { store, env: ENV, fetchImpl, logger: false });
+    const start = await app.inject({ method: "POST", url: "/admin/accounts/start", headers: auth });
+    const { state } = start.json() as { state: string };
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/admin/accounts/complete",
+      headers: auth,
+      payload: { callbackUrl: `http://localhost:51121/oauth-callback?code=xyz&state=${state}` },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.type).toBe("invalid_request_error");
+  });
+
+  it("reports an upstream outage during login as 502, not as a bad request", async () => {
+    // A `server_error` out of `onboard` is the upstream's problem, and the sibling
+    // `:id/onboard` catch answers 502 for the same failure. Reaching it here needs a token
+    // that is already stale when the login hands it over, which `expires_in: 0` produces.
+    const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const href = String(url);
+      if (href.includes("oauth2.googleapis.com/token")) {
+        // The exchange succeeds; the refresh that follows hits the outage.
+        const grant = String(init?.body ?? "");
+        return grant.includes("grant_type=refresh_token")
+          ? new Response("upstream down", { status: 503 })
+          : new Response(JSON.stringify({ access_token: "at", refresh_token: "rt", expires_in: 0 }));
+      }
+      if (href.includes("userinfo")) {
+        return new Response(JSON.stringify({ email: "hmedeiros.ai.006@gmail.com" }));
+      }
+      return new Response("upstream down", { status: 503 });
+    }) as unknown as typeof fetch;
+
+    app = buildServer("test-key", { store, env: ENV, fetchImpl, logger: false });
+    const start = await app.inject({ method: "POST", url: "/admin/accounts/start", headers: auth });
+    const { state } = start.json() as { state: string };
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/admin/accounts/complete",
+      headers: auth,
+      payload: { callbackUrl: `http://localhost:51121/oauth-callback?code=xyz&state=${state}` },
+    });
+
+    expect(response.statusCode).toBe(502);
+    // An outage is not a verdict on the account: it stays parked for onboarding, not `auth`.
+    const list = await app.inject({ method: "GET", url: "/admin/accounts", headers: auth });
+    expect(list.json().accounts[0]).toMatchObject({ statusKind: "onboarding_pending" });
+  });
+
   it("parks the row as onboarding_pending before provisioning starts", async () => {
     // `upsertAccount` writes the account `active` with no project. The window between that
     // insert and the recorded outcome is the one moment a half-provisioned account could be
