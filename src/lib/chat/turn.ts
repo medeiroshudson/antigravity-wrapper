@@ -273,6 +273,8 @@ export class TurnRunner {
           ];
         }
         this.identities.recordSuccess(key, candidate.id);
+        // The turn is the evidence that the wait is over for this family.
+        this.deps.accounts.clearCooldown(candidate.id, wire.runtimeModel);
         return { result, accountId: candidate.id };
       } catch (error) {
           if (!(error instanceof UpstreamError)) throw error;
@@ -301,7 +303,11 @@ export class TurnRunner {
           // this account, so it changes no state: the account is not parked, and the next
           // account gets a try. If that next account answers with the same refusal, the
           // verdict is about the request, and another account would only repeat it.
-          if (error.kind === "transient_rate_limit") {
+          //
+          // An attributed throttle never reaches here: the backend named this account's own
+          // wait, so it follows the normal account-failure path below (bench + failover)
+          // instead of stopping the pool on a verdict the request did not produce.
+          if (error.kind === "transient_rate_limit" && failureScope(error) === "request") {
             const verdict = refusalKey(error);
             const previous = verdicts.get(verdict);
             if (previous !== undefined && previous !== candidate.id) {
@@ -337,7 +343,7 @@ export class TurnRunner {
           }
 
           if (failureScope(error) === "account") {
-            this.deps.accounts.applyFailure(candidate.id, error);
+            this.deps.accounts.applyFailure(candidate.id, error, wire.runtimeModel);
           }
           this.logger.warn(
             {
@@ -347,7 +353,7 @@ export class TurnRunner {
               // client_error, model_not_found, server_error and license change no state,
               // so name the action instead of the (misleadingly empty) cooldown window.
               action:
-                error.kind === "quota"
+                error.kind === "quota" || error.kind === "transient_rate_limit"
                   ? "cooldown"
                   : error.kind === "auth" ||
                       error.kind === "validation_required" ||

@@ -21,6 +21,7 @@ describe("TurnRunner with search grounding", () => {
       ensureFresh: async () => ({ id: "acc-1", accessToken: "tok", projectId: "p1" }),
       poolSummary: () => ({ enabled: 1, cooling: 0, soonestCooldownUntil: null }),
       markUsed: () => {},
+      clearCooldown: () => {},
     };
 
     const runner = new TurnRunner({
@@ -62,6 +63,7 @@ describe("TurnRunner with search grounding", () => {
       ensureFresh: async () => ({ id: "acc-1", accessToken: "tok", projectId: "p1" }),
       poolSummary: () => ({ enabled: 1, cooling: 0, soonestCooldownUntil: null }),
       markUsed: () => {},
+      clearCooldown: () => {},
     };
 
     const runner = new TurnRunner({

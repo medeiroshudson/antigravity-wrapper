@@ -10,6 +10,11 @@ import { isDefinitive, type UpstreamError } from "./errors.js";
  *
  * `server_error` entra como `request` por outro motivo: ele descreve o canal ou o
  * transporte, não a credencial. Nenhum dos dois muda o estado da conta.
+ *
+ * `transient_rate_limit` é dividido pelo hint: com `retryAfterMs` o backend nomeou a
+ * espera desta conta (o corpo diz "Resets in 30s" para ela e não para as outras), então a
+ * falha é dela; sem hint o mesmo corpo responde por qualquer conta — foi exatamente essa
+ * a medição de 2026-11-15 — e o veredito é do request.
  */
 export type FailureScope = "account" | "request";
 
@@ -17,6 +22,7 @@ export type FailureScope = "account" | "request";
 export function failureScope(error: UpstreamError): FailureScope {
   if (isDefinitive(error.kind)) return "request";
   if (error.kind === "server_error") return "request";
+  if (error.kind === "transient_rate_limit" && error.retryAfterMs === null) return "request";
   return "account";
 }
 

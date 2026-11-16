@@ -60,6 +60,7 @@ function poolAccount(
     createdAt: 0,
     lastUsedAt: iso(lastUsedAt),
     quota,
+    cooldowns: [],
     ...over,
   };
 }
@@ -68,8 +69,12 @@ const ACCOUNT_492B = "account-492b954c1a93c92f";
 const ACCOUNT_123E = "account-123e90731bac6450";
 const ACCOUNT_9A15 = "account-9a15b1ef6fde541a";
 
-export const REAL_POOL: AccountSnapshot[] = [
-  poolAccount(ACCOUNT_492B, "2026-10-18T20:58:48Z", [
+/**
+ * The third account was captured while the admin view reported it `cooldown`. That column
+ * is now a projection of `account_cooldowns`, and this fixture carries no row for it: the
+ * reading is what the pool served with, and the selector ranks on the rows.
+ */
+export const REAL_POOL: AccountSnapshot[] = [  poolAccount(ACCOUNT_492B, "2026-10-18T20:58:48Z", [
     bucket(ACCOUNT_492B, "gemini-5h", 0.9498, "2026-10-21T20:13:26Z", "2026-10-21T15:43:33Z"),
     bucket(ACCOUNT_492B, "gemini-weekly", 0.5371, "2026-10-23T21:58:09Z", "2026-10-21T15:43:33Z"),
     bucket(ACCOUNT_492B, "3p-5h", 1, "2026-10-21T20:43:33Z", "2026-10-21T15:43:33Z"),

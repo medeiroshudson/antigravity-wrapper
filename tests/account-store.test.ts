@@ -350,7 +350,210 @@ describe("AccountStore", () => {
     const snapshot = store.snapshot();
     expect(snapshot).toHaveLength(1);
     expect(snapshot[0]?.quota).toHaveLength(1);
+    expect(snapshot[0]?.cooldowns).toEqual([]);
     expect(snapshot[0]?.quotaSummaryError).toBeNull();
+  });
+});
+
+describe("AccountStore scoped cooldowns", () => {
+  const NOW = 2_000_000_000_000;
+
+  it("counts failures per scope and benches only when told to", () => {
+    add();
+    const first = store.recordFailure("a1", {
+      scope: "gemini-",
+      kind: "transient_rate_limit",
+      until: null,
+      reason: "slow down",
+    });
+    const second = store.recordFailure("a1", {
+      scope: "gemini-",
+      kind: "transient_rate_limit",
+      until: null,
+      reason: "slow down",
+    });
+    expect([first, second]).toEqual([1, 2]);
+    // A count is not a bench: nothing is cooling yet.
+    expect(store.cooldownsFor("a1", NOW)).toEqual([]);
+
+    expect(
+      store.recordFailure("a1", {
+        scope: "gemini-",
+        kind: "transient_rate_limit",
+        until: NOW + 30_000,
+        reason: "slow down",
+      }),
+    ).toBe(3);
+    expect(store.cooldownsFor("a1", NOW)).toEqual([
+      { scope: "gemini-", kind: "transient_rate_limit", until: NOW + 30_000, reason: "slow down", failures: 3 },
+    ]);
+  });
+
+  it("keeps one row per scope, so one family's bench leaves the other intact", () => {
+    add();
+    store.recordFailure("a1", { scope: "gemini-", kind: "quota", until: NOW + 60_000, reason: "gemini wall" });
+    store.recordFailure("a1", { scope: "3p-", kind: "quota", until: NOW + 60_000, reason: "3p wall" });
+    expect(store.cooldownsFor("a1", NOW).map((row) => row.scope).sort()).toEqual(["3p-", "gemini-"]);
+
+    store.clearCooldowns("a1", "gemini-");
+    expect(store.cooldownsFor("a1", NOW).map((row) => row.scope)).toEqual(["3p-"]);
+
+    store.clearCooldowns("a1");
+    expect(store.cooldownsFor("a1", NOW)).toEqual([]);
+  });
+
+  it("retires a bench whose time has passed and keeps a live one", () => {
+    add();
+    store.recordFailure("a1", { scope: "gemini-", kind: "quota", until: NOW - 1, reason: "old wall" });
+    store.recordFailure("a1", { scope: "3p-", kind: "quota", until: NOW + 60_000, reason: "live wall" });
+
+    store.expireCooldowns(NOW);
+
+    expect(store.cooldownsFor("a1", NOW).map((row) => row.scope)).toEqual(["3p-"]);
+  });
+
+  it("projects the widest active cooldown into the columns the admin surface reads", () => {
+    add();
+    store.recordFailure("a1", {
+      scope: "gemini-",
+      kind: "transient_rate_limit",
+      until: NOW + 30_000,
+      reason: "slow down",
+    });
+    store.recordFailure("a1", { scope: "3p-", kind: "quota", until: NOW + 90_000, reason: "3p wall" });
+
+    const account = store.getAccount("a1");
+    // The table is the source of truth; `status`/`cooldownUntil` exist so every reader
+    // does not have to join. The widest bench is what the account as a whole is waiting on.
+    expect(account).toMatchObject({
+      status: "cooldown",
+      cooldownUntil: NOW + 90_000,
+      statusKind: "quota",
+      lastError: "3p wall",
+    });
+  });
+
+  it("goes back to active when the only bench expires, keeping the reason", () => {
+    add();
+    store.recordFailure("a1", {
+      scope: "*",
+      kind: "quota",
+      until: Date.now() - 1_000,
+      reason: "quota wall",
+    });
+
+    // Retiring the row is what reports the account as serving again; the reason stays on
+    // the account because it explains why it was parked at all.
+    expect(store.getAccount("a1")).toMatchObject({
+      status: "active",
+      cooldownUntil: null,
+      statusKind: null,
+      lastError: "quota wall",
+    });
+  });
+
+  it("carries the active cooldowns into the snapshot the selector reads", () => {
+    add();
+    store.recordFailure("a1", {
+      scope: "3p-",
+      kind: "quota",
+      until: Date.now() + 60_000,
+      reason: "3p wall",
+    });
+
+    expect(store.snapshot()[0]?.cooldowns).toEqual([
+      expect.objectContaining({ scope: "3p-", kind: "quota" }),
+    ]);
+  });
+
+  it("drops an account's cooldowns with the account and on re-login", () => {
+    add();
+    store.recordFailure("a1", { scope: "*", kind: "quota", until: Date.now() + 60_000, reason: "wall" });
+
+    add();
+    expect(store.cooldownsFor("a1")).toEqual([]);
+
+    store.recordFailure("a1", { scope: "*", kind: "quota", until: Date.now() + 60_000, reason: "wall" });
+    store.removeAccount("a1");
+    expect(store.cooldownsFor("a1")).toEqual([]);
+  });
+});
+
+describe("AccountStore cooldown migration", () => {
+  it("moves a legacy status cooldown into the table and clears the columns", () => {
+    const path = join(dir, "legacy-cooldown.db");
+    const db = new DatabaseSync(path);
+    db.exec(`
+      CREATE TABLE accounts (
+        id TEXT PRIMARY KEY, email TEXT, refresh_token TEXT NOT NULL,
+        access_token TEXT, access_expires_at INTEGER NOT NULL DEFAULT 0,
+        project_id TEXT, status TEXT NOT NULL DEFAULT 'active',
+        cooldown_until INTEGER, last_error TEXT, status_kind TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1, priority INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL, last_used_at INTEGER
+      );
+    `);
+    db.prepare(
+      `INSERT INTO accounts (id, email, refresh_token, access_token, access_expires_at, project_id,
+         status, cooldown_until, last_error, status_kind, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run("legacy", "l@x.com", "r", "a", Date.now() + 3_600_000, "p", "cooldown", Date.now() + 60_000, "quota wall", "rate_limited", 1);
+    db.close();
+
+    const migrated = new AccountStore(path);
+    const account = migrated.getAccount("legacy");
+
+    // One fact, one table: the row carries the wait, the account stays serving once it ends.
+    expect(migrated.cooldownsFor("legacy")).toEqual([
+      {
+        scope: "*",
+        // The legacy status kind was the admin vocabulary; the table speaks failure kinds.
+        kind: "transient_rate_limit",
+        until: expect.any(Number),
+        reason: "quota wall",
+        failures: 1,
+      },
+    ]);
+    expect(account?.status).toBe("cooldown");
+
+    const raw = migrated.raw().prepare("SELECT status, cooldown_until FROM accounts WHERE id = 'legacy'").get() as {
+      status: string;
+      cooldown_until: number | null;
+    };
+    expect(raw.status).toBe("active");
+    expect(raw.cooldown_until).toBeNull();
+    migrated.close();
+  });
+
+  it("is idempotent, so a second boot adds no duplicate row", () => {
+    const path = join(dir, "legacy-cooldown.db");
+    const db = new DatabaseSync(path);
+    db.exec(`
+      CREATE TABLE accounts (
+        id TEXT PRIMARY KEY, email TEXT, refresh_token TEXT NOT NULL,
+        access_token TEXT, access_expires_at INTEGER NOT NULL DEFAULT 0,
+        project_id TEXT, status TEXT NOT NULL DEFAULT 'active',
+        cooldown_until INTEGER, last_error TEXT, status_kind TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1, priority INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL, last_used_at INTEGER
+      );
+    `);
+    db.prepare(
+      `INSERT INTO accounts (id, refresh_token, status, cooldown_until, status_kind, created_at)
+       VALUES ('legacy', 'r', 'cooldown', ?, 'quota', 1)`,
+    ).run(Date.now() + 60_000);
+    db.close();
+
+    const first = new AccountStore(path);
+    const rowsAfterFirst = first.raw().prepare("SELECT COUNT(*) AS n FROM account_cooldowns").get() as { n: number };
+    first.close();
+
+    const second = new AccountStore(path);
+    const rowsAfterSecond = second.raw().prepare("SELECT COUNT(*) AS n FROM account_cooldowns").get() as { n: number };
+    second.close();
+
+    expect(rowsAfterFirst.n).toBe(1);
+    expect(rowsAfterSecond.n).toBe(1);
   });
 });
 

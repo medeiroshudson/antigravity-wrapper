@@ -40,6 +40,7 @@ function account(over: Partial<AccountSnapshot> & { id: string }): AccountSnapsh
     createdAt: 0,
     lastUsedAt: null,
     quota: [],
+    cooldowns: [],
     ...over,
   };
 }

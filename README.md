@@ -341,6 +341,7 @@ not fail the login), and stores everything:
     "paidTier": { "id": "g1-pro-tier", "name": "Google AI Pro" },
     "cooldownUntil": null,
     "cooldownResetsIn": null,
+    "cooldowns": [],
     "lastError": null,
     "enabled": true,
     "priority": 0,
@@ -370,7 +371,13 @@ operator reads `status: "active", enabled: false`. Two derived fields close that
 `statusKind` survives the action that follows it: disabling an account the upstream already
 blocked keeps `tos_blocked` (and its `lastError` with the appeal link) instead of overwriting
 it with `operator_disabled`, and re-enabling clears only an operator note. A quota park drops
-its kind when the cooldown expires, keeping `lastError` as history.
+its kind when its cooldown expires, keeping `lastError` as history.
+
+`status: "cooldown"` is now a summary: the account is waiting on at least one active cooldown,
+and `cooldownUntil` is the latest of them. `cooldowns` lists the waits themselves —
+`{ "scope": "gemini-", "kind": "quota", "until": …, "resetsIn": …, "reason": … }` — so a
+reader can tell a `3p-` wall from an account-wide block. See
+[How load balancing works](#how-load-balancing-works).
 
 `paidTier` is an object, `{ "id": …, "name": … }`, or `null` when the tier has not been
 read yet. The **`id`** is the stable field to branch on — `g1-pro-tier` for Google AI Pro,
@@ -1107,7 +1114,8 @@ is embedded in the code.
 | `STREAM_STALL_TIMEOUT_MS` | `120000` | Deadline for silence mid-stream |
 | `QUOTA_REFRESH_TTL_MS` | `300000` | Quota snapshot TTL |
 | `MODELS_TTL_MS` | `14400000` | Model catalog TTL |
-| `COOLDOWN_TRANSIENT_MS` | `60000` | Fallback cooldown when a quota wall names no reset time |
+| `COOLDOWN_TRANSIENT_MS` | `60000` | Default cooldown for a throttle the backend did not time |
+| `COOLDOWN_QUOTA_MS` | `300000` | Default cooldown for a quota wall that named no reset time |
 | `MAX_FAILOVER_ATTEMPTS` | `3` | Ceiling on accounts tried per request |
 | `BODY_LIMIT_BYTES` | `33554432` | Max request body in bytes before a `413`; raise it for very large turns |
 | `LOG_LEVEL` | `info` | Logger level. `info` shows one summary line per request; `debug` adds the per-attempt trace |
@@ -1159,8 +1167,8 @@ through `redact()`, so tokens cannot reach a log line.
 Account selection happens **before** the stream starts, as a pure function over a snapshot
 of the pool. Candidates are ordered like this:
 
-1. **Filter** — keep only accounts that are `enabled` and `active` (or `cooldown` with an
-   expiry that has already passed).
+1. **Filter** — keep only accounts that are `enabled`, not `invalid`, and not waiting on an
+   active cooldown for the requested model family (see below).
 2. **Priority overrides all of it** — an explicit `priority` sorts ahead of quota and pace:
    the highest level is tried first, and the rules below only order accounts within one
    level. This is how you place an account whose quota cannot be measured.
@@ -1180,8 +1188,37 @@ of the pool. Candidates are ordered like this:
    and keeps serving requests. An account at zero quota is benched while its reset is in the
    future and is only probed last, once that reset has passed.
 
-**Cooldown on a quota wall.** A `429` carrying a wall signal (`Resets in …`, quota
-exceeded) puts the account in `cooldown` until the reset time the backend named.
+**Cooldowns are per (account, scope, kind).** A cooldown is not a flag on the account: it
+is a row saying *which* family is waiting, *why*, and *until when*.
+
+- **Scope** is `*` (the whole account) or a family bucket prefix: `gemini-` for the Gemini
+  models, `3p-` for Claude and GPT. A drained `gemini-` family leaves `3p-` serving. A
+  model whose family has no group (`*` is the only scope that applies) is benched only by
+  an account-wide cooldown.
+- **Kind** is the failure that produced it, and the policy is declarative:
+
+  | kind | scope | threshold | default duration |
+  |---|---|---|---|
+  | `quota` | family | 1 | `COOLDOWN_QUOTA_MS` (5 min) |
+  | `transient_rate_limit` | family | 1 | `COOLDOWN_TRANSIENT_MS` (60 s) |
+
+  Every other kind produces no cooldown: a dead token, a verification demand, a TOS block
+  and a definitive refusal are not waits.
+- **Attribution.** A `429` that names a reset (`Resets in 30s`, a `RetryInfo.retryDelay`, a
+  `quotaResetDelay`) is the account's: the backend timed *this* account's wait, so it is
+  benched for the duration it gave. A `429` with no hint is the request's — the same body
+  answers for every account, as measured on 2026-11-15 — and it changes nothing.
+- **Success ends the wait.** A turn served by an account clears that family's cooldown, so
+  an account that recovered early is back in rotation instead of waiting out the clock.
+
+`status`, `cooldownUntil` and `statusKind` on the account are a **projection** of the
+widest active cooldown; the table is the source of truth. `GET /admin/accounts` also lists
+the rows themselves under `cooldowns`, each with its scope, kind, `until` and `resetsIn`.
+
+**The single-eligible-account exception.** When no account can serve a family, the selector
+admits the ones excluded *only* by an active throttle (never by a quota wall, never with
+another disqualification) — a 30 s wait may already be over, and a lone candidate is better
+than an exhausted pool. `orderFor` logs `cooldowns relaxed` at `debug` when it happens.
 
 **An unattributed `429` does neither, and is not retried on the same account.** Throttling
 that carries no wall signal — pressure on the backend, not an exhausted quota — leaves the

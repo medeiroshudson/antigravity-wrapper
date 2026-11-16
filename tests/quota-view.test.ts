@@ -157,6 +157,7 @@ describe("toLeanPoolQuota", () => {
       createdAt: NOW - 86400_000,
       lastUsedAt: null,
       quota: [],
+      cooldowns: [],
       ...over,
     };
   }
@@ -360,24 +361,41 @@ describe("toLeanPoolQuota", () => {
   });
 
   it("keeps a cooling-only pool routable but not available", () => {
-    // An active cooldown benches routing only for the family that drained; the selector
-    // still deems this account eligible for Gemini because its family quota is positive.
-    // Capacity, however, is measured on usable accounts, so a pool with no non-cooling
-    // account is not available — while its reported fraction stays real, not zeroed.
+    // Capacity is measured on accounts that can serve the family right now, so a pool whose
+    // only account carries an account-wide cooldown reports the family as unavailable —
+    // while its reported fraction stays real, not zeroed.
     const cooling = makeAccount({
       id: "cooling",
       status: "cooldown",
       cooldownUntil: NOW + 3600_000,
+      cooldowns: [{ scope: "*", kind: "quota", until: NOW + 3600_000, reason: null, failures: 1 }],
       quota: [row({ bucketId: "gemini-5h", window: "5h", remainingFraction: 0.8 })],
     });
 
     const summary = toLeanPoolQuota([cooling], NOW);
 
     expect(summary.gemini.available).toBe(false);
-    expect(summary.gemini.availableAccounts).toBe(1);
+    expect(summary.gemini.availableAccounts).toBe(0);
     expect(summary.gemini["5h"].remainingPercent).toBe(80);
     expect(summary.gemini["5h"].worstRemainingPercent).toBe(80);
     expect(summary.gemini["5h"].measuredAccounts).toBe(1);
+  });
+
+  it("does not let a cooldown on another family hide this one", () => {
+    // A `3p-` wall says nothing about Gemini capacity: the account still serves it, so the
+    // family stays available. Reading the projected `status` here reported the opposite.
+    const benchedOnClaude = makeAccount({
+      id: "benched-3p",
+      status: "cooldown",
+      cooldownUntil: NOW + 3600_000,
+      cooldowns: [{ scope: "3p-", kind: "quota", until: NOW + 3600_000, reason: null, failures: 1 }],
+      quota: [row({ bucketId: "gemini-5h", window: "5h", remainingFraction: 0.8 })],
+    });
+
+    const summary = toLeanPoolQuota([benchedOnClaude], NOW);
+
+    expect(summary.gemini.available).toBe(true);
+    expect(summary.gemini.availableAccounts).toBe(1);
   });
 
   it("reports observedAt as the oldest reading", () => {

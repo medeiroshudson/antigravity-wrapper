@@ -152,6 +152,14 @@ export function getModelsTtlMs(env: NodeJS.ProcessEnv = process.env): number {
 export function getCooldownTransientMs(env: NodeJS.ProcessEnv = process.env): number {
   return positiveInt(env.COOLDOWN_TRANSIENT_MS, 60_000);
 }
+/**
+ * How long an account waits when a quota wall named no reset. A wall without its own
+ * duration is the case the backend does not explain, so the default is deliberately
+ * longer than a throttle: 5 minutes.
+ */
+export function getCooldownQuotaMs(env: NodeJS.ProcessEnv = process.env): number {
+  return positiveInt(env.COOLDOWN_QUOTA_MS, 300_000);
+}
 
 
 /**

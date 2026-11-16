@@ -1,5 +1,5 @@
 import { PACING_TOLERANCE, paceScore } from "./pacing.js";
-import type { AccountSnapshot } from "./store.js";
+import type { AccountSnapshot, CooldownRow } from "./store.js";
 
 /**
  * The bucket-id prefix of the group a runtime model belongs to (spec §8): the backend
@@ -51,13 +51,28 @@ function hasExpiredZeroQuota(account: AccountSnapshot, bucketIdPrefix: string, n
 }
 
 /**
- * Whether an account may serve a request from this family right now (spec §8 rules 1–2).
- * A `null` prefix means the family is unmeasured, so only the account-wide rules apply.
- *
- * Moved out of `order()` so the pool aggregate can report routability with the same
- * rules the selector uses (spec D4) instead of a second copy that could drift.
+ * The benches that bind this family right now: `*` always applies, a family row applies to
+ * its own prefix, and an unmeasured family (`null`) has no prefix of its own, so only `*`
+ * can bench it.
  */
-export function isEligibleForFamily(
+function activeCooldowns(
+  account: AccountSnapshot,
+  bucketIdPrefix: string | null,
+  now: number,
+): CooldownRow[] {
+  return account.cooldowns.filter(
+    (row) =>
+      row.until > now &&
+      (row.scope === "*" || (bucketIdPrefix !== null && row.scope === bucketIdPrefix)),
+  );
+}
+
+/**
+ * Every rule of `isEligibleForFamily` except the bench. Kept apart so the relaxation in
+ * `orderDecision` can ask "would this account serve if the cooldown were over?" without
+ * copying the other rules into a second place that could drift.
+ */
+function eligibleIgnoringCooldown(
   account: AccountSnapshot,
   bucketIdPrefix: string | null,
   now: number,
@@ -68,19 +83,31 @@ export function isEligibleForFamily(
   if (!account.projectId) return false;
   if (!account.enabled) return false;
   if (account.status === "invalid") return false;
-  const quota = bucketIdPrefix === null ? null : summarizePrefix(account, bucketIdPrefix);
-  if (account.status === "cooldown") {
-    // With no expiry recorded, the cooldown is considered over: keeping the
-    // account ineligible forever would be a silent, permanent loss.
-    if (account.cooldownUntil !== null && account.cooldownUntil > now) {
-      // Still cooling down: keep the account only for a family with positive quota
-      return quota !== null && quota > 0;
-    }
-  }
-  if (quota === 0) {
-    return bucketIdPrefix !== null && hasExpiredZeroQuota(account, bucketIdPrefix, now);
-  }
+  if (bucketIdPrefix === null) return true;
+  const quota = summarizePrefix(account, bucketIdPrefix);
+  if (quota === 0) return hasExpiredZeroQuota(account, bucketIdPrefix, now);
   return true;
+}
+
+/**
+ * Whether an account may serve a request from this family right now (spec §8 rules 1–2).
+ * A `null` prefix means the family is unmeasured, so only the account-wide rules apply.
+ *
+ * The bench is read from `account.cooldowns`, not from `status`: the table is the source of
+ * truth and it names the family, which is what lets one drained family leave the other one
+ * serving. The quota re-admission rule that used to soften the account-wide cooldown is
+ * gone with the reason for it: a cooldown now says which family it belongs to.
+ *
+ * Moved out of `order()` so the pool aggregate can report routability with the same
+ * rules the selector uses (spec D4) instead of a second copy that could drift.
+ */
+export function isEligibleForFamily(
+  account: AccountSnapshot,
+  bucketIdPrefix: string | null,
+  now: number,
+): boolean {
+  if (activeCooldowns(account, bucketIdPrefix, now).length > 0) return false;
+  return eligibleIgnoringCooldown(account, bucketIdPrefix, now);
 }
 
 interface Candidate {
@@ -141,11 +168,8 @@ function orderWithinPriority(candidates: readonly Candidate[]): Candidate[] {
  * Orders the candidates for a request. Pure function: no network, no SQLite.
  *
  * Rules (spec §8, D2):
- *  1. only enabled, non-invalid accounts; an expired cooldown becomes valid again
- *     — a cooldown without `cooldownUntil` is treated as already over (eligible),
- *       since discarding it would silently and permanently lose the account. An active
- *       cooldown only benches the account for the model family that drained: a family with
- *       quota left keeps it eligible (the wall is per family, the cooldown is per account)
+ *  1. only enabled, non-invalid accounts; an active cooldown benches the account for the
+ *     family it names (`*` for the whole account), and only that family
  *  2. accounts with a measured quota of 0 are discarded unless their resetAt <= now
  *  3. explicit priority comes before quota and pace
  *  4. known positive quota before unknown quota, unknown quota before expired zero quota
@@ -159,14 +183,47 @@ export function order(
   runtimeModel: string,
   now: number = Date.now(),
 ): AccountSnapshot[] {
+  return orderDecision(snapshot, runtimeModel, now).accounts;
+}
+
+export interface OrderDecision {
+  accounts: AccountSnapshot[];
+  /** How many accounts the single-eligible-account exception admitted. */
+  relaxed: number;
+}
+
+/**
+ * `order()` plus the one exception that cannot be expressed as a filter.
+ *
+ * When the normal pass has nothing for this family, admit the accounts excluded *only* by
+ * an active throttle: a 30 s wait the backend named may already be over, and offering the
+ * caller an exhausted pool when a plausible account exists is the worse failure. A quota
+ * wall is never relaxed — it does not care how politely the request retries — and neither
+ * is an account that fails another rule (no project, disabled, zero quota).
+ */
+export function orderDecision(
+  snapshot: readonly AccountSnapshot[],
+  runtimeModel: string,
+  now: number = Date.now(),
+): OrderDecision {
   const bucketIdPrefix = familyBucketPrefix(runtimeModel);
-  const candidates: Candidate[] = snapshot
-    .filter((account) => isEligibleForFamily(account, bucketIdPrefix, now))
-    .map((account) => ({
-      account,
-      quota: bucketIdPrefix === null ? null : summarizePrefix(account, bucketIdPrefix),
-      score: bucketIdPrefix === null ? null : paceScore(account, bucketIdPrefix, now),
-    }));
+  const scoring = (account: AccountSnapshot): Candidate => ({
+    account,
+    quota: bucketIdPrefix === null ? null : summarizePrefix(account, bucketIdPrefix),
+    score: bucketIdPrefix === null ? null : paceScore(account, bucketIdPrefix, now),
+  });
+
+  const normal = snapshot.filter((account) => isEligibleForFamily(account, bucketIdPrefix, now));
+  let relaxed: readonly AccountSnapshot[] = [];
+  if (normal.length === 0) {
+    relaxed = snapshot.filter((account) => {
+      if (!eligibleIgnoringCooldown(account, bucketIdPrefix, now)) return false;
+      const benches = activeCooldowns(account, bucketIdPrefix, now);
+      return benches.length > 0 && benches.every((row) => row.kind === "transient_rate_limit");
+    });
+  }
+
+  const candidates = (relaxed.length > 0 ? relaxed : normal).map(scoring);
 
   // Explicit priority is the outermost key; a Map keeps each level's candidates in the
   // order they arrived, then the levels themselves are emitted highest first.
@@ -177,8 +234,9 @@ export function order(
     else byPriority.set(candidate.account.priority, [candidate]);
   }
 
-  return [...byPriority.keys()]
+  const accounts = [...byPriority.keys()]
     .sort((left, right) => right - left)
     .flatMap((priority) => orderWithinPriority(byPriority.get(priority) ?? []))
     .map((candidate) => candidate.account);
+  return { accounts, relaxed: relaxed.length };
 }

@@ -78,7 +78,20 @@ export interface QuotaBucket {
   fetchedAt: number;
 }
 
-export type AccountSnapshot = Account & { quota: QuotaBucket[] };
+export type AccountSnapshot = Account & { quota: QuotaBucket[]; cooldowns: CooldownRow[] };
+
+/**
+ * One bench: why (the kind), where (the family bucket prefix, or `*` for the whole
+ * account) and until when. `until` 0 means the row only counts failures — the policy's
+ * threshold has not been reached yet, so nothing is cooling.
+ */
+export interface CooldownRow {
+  scope: string;
+  kind: string;
+  until: number;
+  reason: string | null;
+  failures: number;
+}
 
 const PENDING_OAUTH_TTL_MS = 5 * 60 * 1000;
 const SCHEMA_VERSION = 1;
@@ -103,7 +116,48 @@ interface Row {
   last_used_at: number | null;
 }
 
-function toAccount(row: Row): Account {
+interface CooldownDbRow {
+  account_id: string;
+  scope: string;
+  kind: string;
+  until: number;
+  reason: string | null;
+  failures: number;
+}
+
+/** The admin vocabulary for a bench, derived from the failure kind that produced it. */
+function statusKindOf(kind: string): AccountStatusKind | null {
+  if (kind === "quota") return "quota";
+  if (kind === "transient_rate_limit") return "rate_limited";
+  return null;
+}
+
+/**
+ * Maps a row to an `Account`, projecting the active cooldowns into `status` and
+ * `cooldownUntil`.
+ *
+ * The `account_cooldowns` table is the one source of truth for a bench; these two columns
+ * exist so every reader (the admin surface, `accountState`, the old quota views) does not
+ * have to join, and they are computed here on every read — nothing writes them as state
+ * any more. `invalid` still outranks a bench: a TOS block or a dead credential is the
+ * actionable fact even while a family waits.
+ */
+function toAccount(row: Row, cooldowns: readonly CooldownRow[] = []): Account {
+  const widest = cooldowns.reduce<CooldownRow | null>(
+    (best, rowCooldown) =>
+      best === null || rowCooldown.until > best.until ? rowCooldown : best,
+    null,
+  );
+  const invalid = row.status === "invalid";
+  // `invalid` outranks a bench: a TOS block or a dead credential is the actionable fact,
+  // and its kind and reason must not be masked by a family that happens to be waiting.
+  const status: AccountStatus = invalid
+    ? "invalid"
+    : widest !== null
+      ? "cooldown"
+      : row.status === "cooldown"
+        ? "active"
+        : (row.status as AccountStatus);
   return {
     id: row.id,
     email: row.email,
@@ -111,10 +165,14 @@ function toAccount(row: Row): Account {
     accessToken: row.access_token,
     accessExpiresAt: row.access_expires_at,
     projectId: row.project_id,
-    status: row.status as AccountStatus,
-    statusKind: (row.status_kind as AccountStatusKind | null) ?? null,
-    cooldownUntil: row.cooldown_until,
-    lastError: row.last_error,
+    status,
+    statusKind: invalid
+      ? ((row.status_kind as AccountStatusKind | null) ?? null)
+      : widest !== null
+        ? statusKindOf(widest.kind)
+        : ((row.status_kind as AccountStatusKind | null) ?? null),
+    cooldownUntil: widest !== null ? widest.until : null,
+    lastError: invalid ? row.last_error : widest !== null ? widest.reason : row.last_error,
     quotaSummaryError: row.quota_summary_error,
     paidTierId: row.paid_tier_id,
     paidTierName: row.paid_tier_name,
@@ -148,6 +206,15 @@ export class AccountStore {
       CREATE TABLE IF NOT EXISTS oauth_pending (
         state TEXT PRIMARY KEY, code_verifier TEXT NOT NULL, created_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS account_cooldowns (
+        account_id TEXT NOT NULL,
+        scope TEXT NOT NULL,        -- '*' = a conta inteira, ou o prefixo da família: 'gemini-', '3p-'
+        kind TEXT NOT NULL,         -- o UpstreamFailureKind que produziu a espera
+        until INTEGER NOT NULL,     -- 0 = só contagem de falhas, sem espera
+        reason TEXT,
+        failures INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY (account_id, scope)
+      );
     `);
     // quota_snapshots is created by the migrator, not here: the migrator's job is to
     // drop a previous shape and install the current one, in one place.
@@ -155,6 +222,8 @@ export class AccountStore {
     // Additive column, independent of the destructive version step: a new column does not
     // justify re-running the quota rebuild.
     this.ensureColumns([["status_kind", "TEXT"]]);
+    // After the column exists: the migration reads it to name the legacy bench's kind.
+    this.migrateCooldowns();
     // Rows parked before the column existed: the only way `enabled` becomes 0 is an
     // operator action, so that is what the backfill records (and only once — afterwards
     // the kind is set and the guard skips them).
@@ -200,6 +269,28 @@ export class AccountStore {
     ];
     this.ensureColumns(added);
     this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+  }
+
+  /**
+   * Moves a bench from the old account-wide columns into `account_cooldowns`.
+   *
+   * Unversioned on purpose: the step is idempotent (the `UPDATE` empties the source on the
+   * first boot, and `INSERT OR IGNORE` covers the primary key), so it costs one statement
+   * on every later start instead of a schema bump that would re-run the destructive quota
+   * rebuild. The legacy `status_kind` spoke the admin vocabulary; the table speaks failure
+   * kinds, so `rate_limited` becomes `transient_rate_limit` — the kind a policy knows.
+   */
+  private migrateCooldowns(): void {
+    this.db.exec(`
+      INSERT OR IGNORE INTO account_cooldowns (account_id, scope, kind, until, reason, failures)
+      SELECT id, '*',
+             CASE WHEN status_kind = 'rate_limited' THEN 'transient_rate_limit' ELSE 'quota' END,
+             COALESCE(cooldown_until, 0), last_error, 1
+      FROM accounts WHERE status = 'cooldown';
+      UPDATE accounts SET status = 'active', cooldown_until = NULL,
+        status_kind = CASE WHEN status_kind IN ('quota','rate_limited') THEN NULL ELSE status_kind END
+      WHERE status = 'cooldown';
+    `);
   }
 
   private ensureColumns(columns: Array<[string, string]>): void {
@@ -259,42 +350,125 @@ export class AccountStore {
            last_error = NULL, status_kind = NULL, quota_summary_error = NULL`,
       )
       .run(input.id, input.email, input.refreshToken, input.accessToken, input.accessExpiresAt, input.projectId, now);
+    // Re-login reactivates the account: a bench recorded for the previous credential must
+    // not survive it, or a fresh token would arrive pre-chilled.
+    this.clearCooldowns(input.id);
     const account = this.getAccount(input.id);
     if (!account) throw new Error(t("account.notFoundAfterUpsert", { id: input.id }));
     return account;
   }
 
   /**
-   * Retires cooldowns whose time has passed, so the reported status matches what the
-   * selector actually does with them (spec §9.1: `cooldown --expira--> active`). The
-   * selector has always admitted these accounts, so without this the admin view reads
-   * "cooldown" while requests are being served.
-   *
-   * The recorded `last_error` is kept: it is why the account was parked, and it stays
-   * useful after the account is back in rotation.
+   * Retires the benches whose time has passed. A cooldown with `until` 0 is a failure
+   * counter, not a bench, and survives: deleting it would reset the policy's threshold on
+   * every read.
    */
-  private expireCooldowns(now: number = Date.now()): void {
-    this.db
-      .prepare(
-        `UPDATE accounts SET status = 'active', cooldown_until = NULL,
-           status_kind = CASE WHEN status_kind IN ('quota','rate_limited') THEN NULL ELSE status_kind END
-         WHERE status = 'cooldown' AND (cooldown_until IS NULL OR cooldown_until <= ?)`,
-      )
-      .run(now);
+  expireCooldowns(now: number = Date.now()): void {
+    this.db.prepare("DELETE FROM account_cooldowns WHERE until > 0 AND until <= ?").run(now);
   }
 
   getAccount(id: string): Account | undefined {
-    this.expireCooldowns();
+    const now = Date.now();
+    this.expireCooldowns(now);
     const row = this.db.prepare("SELECT * FROM accounts WHERE id = ?").get(id) as Row | undefined;
-    return row ? toAccount(row) : undefined;
+    return row ? toAccount(row, this.cooldownsFor(id, now)) : undefined;
   }
 
   listAccounts(): Account[] {
-    this.expireCooldowns();
+    const now = Date.now();
+    this.expireCooldowns(now);
     const rows = this.db
       .prepare("SELECT * FROM accounts ORDER BY priority DESC, created_at ASC")
       .all() as unknown as Row[];
-    return rows.map(toAccount);
+    const byAccount = this.cooldowns(now);
+    return rows.map((row) => toAccount(row, byAccount.get(row.id) ?? []));
+  }
+
+  /**
+   * Every active bench, grouped by account: one query for a whole snapshot, so building
+   * the selector's view does not become one query per account.
+   */
+  cooldowns(now: number = Date.now()): Map<string, CooldownRow[]> {
+    this.expireCooldowns(now);
+    const rows = this.db
+      .prepare(
+        `SELECT account_id, scope, kind, until, reason, failures
+         FROM account_cooldowns WHERE until > ? ORDER BY until ASC`,
+      )
+      .all(now) as unknown as CooldownDbRow[];
+    const grouped = new Map<string, CooldownRow[]>();
+    for (const row of rows) {
+      const entry: CooldownRow = {
+        scope: row.scope,
+        kind: row.kind,
+        until: row.until,
+        reason: row.reason,
+        failures: row.failures,
+      };
+      const list = grouped.get(row.account_id);
+      if (list) list.push(entry);
+      else grouped.set(row.account_id, [entry]);
+    }
+    return grouped;
+  }
+
+  /** The active benches of one account, which is what the admin view lists. */
+  cooldownsFor(accountId: string, now: number = Date.now()): CooldownRow[] {
+    return this.cooldowns(now).get(accountId) ?? [];
+  }
+
+  /**
+   * The streak of failures recorded for (account, scope), bench or not. The service reads
+   * it before writing so one failure counts once and the policy's threshold can ask how
+   * many came before.
+   */
+  failureStreak(accountId: string, scope: string): number {
+    const row = this.db
+      .prepare("SELECT failures FROM account_cooldowns WHERE account_id = ? AND scope = ?")
+      .get(accountId, scope) as { failures: number } | undefined;
+    return row?.failures ?? 0;
+  }
+
+  /**
+   * Records one failure for (account, scope) and returns the new count. `until` null only
+   * counts: the policy's threshold has not been reached, so nothing cools yet. An existing
+   * bench is never shortened by a count-only write.
+   */
+  recordFailure(
+    accountId: string,
+    input: { scope: string; kind: string; until: number | null; reason: string | null },
+  ): number {
+    this.db
+      .prepare(
+        `INSERT INTO account_cooldowns (account_id, scope, kind, until, reason, failures)
+         VALUES (?, ?, ?, ?, ?, 1)
+         ON CONFLICT(account_id, scope) DO UPDATE SET
+           kind = excluded.kind,
+           reason = excluded.reason,
+           until = CASE WHEN excluded.until > 0 THEN excluded.until ELSE account_cooldowns.until END,
+           failures = account_cooldowns.failures + 1`,
+      )
+      .run(accountId, input.scope, input.kind, input.until ?? 0, input.reason);
+    if (input.reason !== null) {
+      // The row is deleted when the bench expires, but the reason is why the account was
+      // parked at all: keeping it on the account is what leaves history after the row goes.
+      this.db.prepare("UPDATE accounts SET last_error = ? WHERE id = ?").run(input.reason, accountId);
+    }
+    const row = this.db
+      .prepare("SELECT failures FROM account_cooldowns WHERE account_id = ? AND scope = ?")
+      .get(accountId, input.scope) as { failures: number } | undefined;
+    return row?.failures ?? 1;
+  }
+
+  /** Deletes one scope's bench, or every bench of the account when `scope` is omitted. */
+  clearCooldowns(accountId: string, scope?: string): void {
+    if (scope === undefined) {
+      this.db.prepare("DELETE FROM account_cooldowns WHERE account_id = ?").run(accountId);
+      return;
+    }
+    this.db
+      .prepare("DELETE FROM account_cooldowns WHERE account_id = ? AND scope = ?")
+      .run(accountId, scope);
   }
 
   setStatus(
@@ -306,15 +480,33 @@ export class AccountStore {
       statusKind?: AccountStatusKind | null;
     } = {},
   ): void {
+    if (status === "cooldown") {
+      // The table is the source of truth: parking the account writes the bench there and
+      // leaves the columns for `toAccount` to project.
+      this.db
+        .prepare(
+          `INSERT INTO account_cooldowns (account_id, scope, kind, until, reason, failures)
+           VALUES (?, '*', ?, ?, ?, 1)
+           ON CONFLICT(account_id, scope) DO UPDATE SET
+             kind = excluded.kind, until = excluded.until, reason = excluded.reason`,
+        )
+        .run(
+          id,
+          opts.statusKind === "rate_limited" ? "transient_rate_limit" : "quota",
+          opts.cooldownUntil ?? 0,
+          opts.lastError ?? null,
+        );
+      this.db
+        .prepare("UPDATE accounts SET status = 'active', cooldown_until = NULL, status_kind = NULL, last_error = ? WHERE id = ?")
+        .run(opts.lastError ?? null, id);
+      return;
+    }
+    // Any other verdict ends the account-wide bench: it either replaces the reason or
+    // releases the account, and a stale row would keep projecting `cooldown` over it.
+    this.clearCooldowns(id);
     this.db
-      .prepare("UPDATE accounts SET status = ?, cooldown_until = ?, last_error = ?, status_kind = ? WHERE id = ?")
-      .run(
-        status,
-        status === "cooldown" ? (opts.cooldownUntil ?? null) : null,
-        opts.lastError ?? null,
-        opts.statusKind ?? null,
-        id,
-      );
+      .prepare("UPDATE accounts SET status = ?, cooldown_until = NULL, last_error = ?, status_kind = ? WHERE id = ?")
+      .run(status, opts.lastError ?? null, opts.statusKind ?? null, id);
   }
 
   /**
@@ -356,6 +548,9 @@ export class AccountStore {
          WHERE id = ?`,
       )
       .run(input.projectId, input.paidTierId, input.paidTierName, id);
+    // Provisioning is a new fact about the account; the bench it was carrying was about
+    // the unprovisioned one.
+    this.clearCooldowns(id);
   }
 
   setTokens(id: string, tokens: { accessToken: string; accessExpiresAt: number }): void {
@@ -401,6 +596,7 @@ export class AccountStore {
 
   removeAccount(id: string): void {
     this.db.prepare("DELETE FROM quota_snapshots WHERE account_id = ?").run(id);
+    this.db.prepare("DELETE FROM account_cooldowns WHERE account_id = ?").run(id);
     this.db.prepare("DELETE FROM accounts WHERE id = ?").run(id);
   }
 
@@ -472,7 +668,13 @@ export class AccountStore {
   }
 
   snapshot(): AccountSnapshot[] {
-    return this.listAccounts().map((account) => ({ ...account, quota: this.getQuota(account.id) }));
+    const now = Date.now();
+    const cooldowns = this.cooldowns(now);
+    return this.listAccounts().map((account) => ({
+      ...account,
+      quota: this.getQuota(account.id),
+      cooldowns: cooldowns.get(account.id) ?? [],
+    }));
   }
 
   savePendingOAuth(state: string, codeVerifier: string, createdAt = Date.now()): void {

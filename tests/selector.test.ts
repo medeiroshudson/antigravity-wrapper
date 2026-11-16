@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { familyBucketPrefix, isEligibleForFamily, order, summarizeQuota } from "../src/lib/accounts/selector.js";
-import type { AccountSnapshot } from "../src/lib/accounts/store.js";
+import {
+  familyBucketPrefix,
+  isEligibleForFamily,
+  order,
+  orderDecision,
+  summarizeQuota,
+} from "../src/lib/accounts/selector.js";
+import type { AccountSnapshot, CooldownRow } from "../src/lib/accounts/store.js";
 import { REAL_POOL, REAL_POOL_NOW } from "./fixtures/pool.js";
 
 function account(over: Partial<AccountSnapshot> & { id: string }): AccountSnapshot {
@@ -21,9 +27,19 @@ function account(over: Partial<AccountSnapshot> & { id: string }): AccountSnapsh
     createdAt: 0,
     lastUsedAt: null,
     quota: [],
+    cooldowns: [],
     ...over,
   };
 }
+
+function cooling(
+  scope: string,
+  kind = "quota",
+  until: number = NOW + 1_000,
+): CooldownRow {
+  return { scope, kind, until, reason: null, failures: 1 };
+}
+
 
 function bucket(bucketId: string, remainingFraction: number, resetAt: number | null = null) {
   return {
@@ -105,8 +121,8 @@ describe("order", () => {
   it("discards an active cooldown and re-includes an expired one", () => {
     const result = order(
       [
-        account({ id: "cooling", status: "cooldown", cooldownUntil: NOW + 1000 }),
-        account({ id: "expired", status: "cooldown", cooldownUntil: NOW - 1000 }),
+        account({ id: "cooling", cooldowns: [cooling("*", "quota", NOW + 1_000)] }),
+        account({ id: "expired", cooldowns: [cooling("*", "quota", NOW - 1_000)] }),
       ],
       "m",
       NOW,
@@ -114,11 +130,14 @@ describe("order", () => {
     expect(result.map((a) => a.id)).toEqual(["expired"]);
   });
 
-  it("re-includes a cooldown without a recorded expiration", () => {
+  it("re-includes a cooldown that never recorded an expiration", () => {
+    // `until` 0 is the row a failure count writes before the threshold benches it, and
+    // the shape an old cooldown with no date became: treating it as binding would lose
+    // the account forever.
     const result = order(
       [
-        account({ id: "no-expiry", status: "cooldown", cooldownUntil: null }),
-        account({ id: "cooling", status: "cooldown", cooldownUntil: NOW + 1000 }),
+        account({ id: "no-expiry", cooldowns: [cooling("*", "quota", 0)] }),
+        account({ id: "cooling", cooldowns: [cooling("*", "quota", NOW + 1_000)] }),
       ],
       "m",
       NOW,
@@ -126,17 +145,15 @@ describe("order", () => {
     expect(result.map((a) => a.id)).toEqual(["no-expiry"]);
   });
 
-  it("keeps a cooling account eligible for a family it still has quota in", () => {
-    // Measured: a quota wall is per model family (gemini-* vs 3p-*), but the cooldown is
-    // stored on the account. Benching the whole account for a drained Claude quota took a
-    // fully-stocked Gemini quota out of service with it.
+  it("keeps an account benched on one family eligible for the other", () => {
+    // Measured: a quota wall is per model family (gemini-* vs 3p-*). Benching the whole
+    // account for a drained Claude quota took a fully-stocked Gemini quota out of service.
     const result = order(
       [
         account({
           id: "cooling",
-          status: "cooldown",
-          cooldownUntil: NOW + 1000,
-          quota: [bucket("3p-5h", 0), bucket("gemini-5h", 1)],
+          cooldowns: [cooling("3p-")],
+          quota: [bucket("3p-5h", 0.5), bucket("gemini-5h", 1)],
         }),
       ],
       "gemini-3.8-flash-high",
@@ -145,28 +162,46 @@ describe("order", () => {
     expect(result.map((a) => a.id)).toEqual(["cooling"]);
   });
 
-  it("still discards a cooling account for the family that drained", () => {
+  it("still discards an account benched on the family that failed", () => {
     const result = order(
       [
         account({
           id: "cooling",
-          status: "cooldown",
-          cooldownUntil: NOW + 1000,
-          quota: [bucket("3p-5h", 0), bucket("gemini-5h", 1)],
+          cooldowns: [cooling("3p-")],
+          quota: [bucket("3p-5h", 0.5), bucket("gemini-5h", 1)],
         }),
       ],
       "claude-opus-4-6-thinking",
       NOW,
     );
+    // The quota is positive, so only the cooldown can exclude it here.
     expect(result.map((a) => a.id)).toEqual([]);
   });
 
-  it("discards a cooling account when the requested family has no measured quota", () => {
-    // No buckets for the family means the quota cannot be confirmed, so a cooling account
-    // stays benched rather than being tried blind.
+  it("keeps an account-wide cooldown binding on every family", () => {
     const result = order(
-      [account({ id: "cooling", status: "cooldown", cooldownUntil: NOW + 1000, quota: [bucket("3p-5h", 1)] })],
+      [
+        account({
+          id: "cooling",
+          cooldowns: [cooling("*", "quota", NOW + 1_000)],
+          quota: [bucket("3p-5h", 1), bucket("gemini-5h", 1)],
+        }),
+      ],
       "gemini-3.8-flash-high",
+      NOW,
+    );
+    expect(result.map((a) => a.id)).toEqual([]);
+  });
+
+  it("binds only the account-wide cooldown when the requested family has no measurement", () => {
+    // An unmeasured family (no bucket prefix) has no scope of its own, so a family
+    // cooldown says nothing about it while `*` does.
+    const familyOnly = account({ id: "family-only", cooldowns: [cooling("gemini-")] });
+    expect(isEligibleForFamily(familyOnly, null, NOW)).toBe(true);
+
+    const result = order(
+      [account({ id: "cooling", cooldowns: [cooling("*", "quota", NOW + 1_000)] })],
+      "llama-4-scout",
       NOW,
     );
     expect(result.map((a) => a.id)).toEqual([]);
@@ -283,7 +318,7 @@ describe("order", () => {
     const result = order(
       [
         account({ id: "sem-grupos" }),
-        account({ id: "cooling", status: "cooldown", cooldownUntil: NOW + 1000 }),
+        account({ id: "cooling", cooldowns: [cooling("*", "quota", NOW + 1_000)] }),
       ],
       "gemini-3.8-flash-high",
       NOW,
@@ -403,18 +438,27 @@ describe("order — pace deficit", () => {
 });
 
 describe("isEligibleForFamily", () => {
-  it("keeps a cooling account eligible for the family that still has quota", () => {
-    const cooling = account({
+  it("binds only the family the cooldown names", () => {
+    const benched = account({
       id: "cooling",
-      status: "cooldown",
-      cooldownUntil: NOW + 1_000,
+      cooldowns: [cooling("3p-")],
       quota: [bucket("gemini-5h", 0.5)],
     });
-    expect(isEligibleForFamily(cooling, "gemini-", NOW)).toBe(true);
-    // No 3p row means the drained family is unmeasured, so the active cooldown stays
-    // binding there, and an unknown model family has no quota to vouch for it either.
-    expect(isEligibleForFamily(cooling, "3p-", NOW)).toBe(false);
-    expect(isEligibleForFamily(cooling, null, NOW)).toBe(false);
+    expect(isEligibleForFamily(benched, "gemini-", NOW)).toBe(true);
+    expect(isEligibleForFamily(benched, "3p-", NOW)).toBe(false);
+    // An unmeasured family has no scope of its own, so a family row says nothing about it.
+    expect(isEligibleForFamily(benched, null, NOW)).toBe(true);
+  });
+
+  it("binds every family when the cooldown is account-wide", () => {
+    const benched = account({
+      id: "cooling",
+      cooldowns: [cooling("*", "quota", NOW + 1_000)],
+      quota: [bucket("gemini-5h", 0.5)],
+    });
+    expect(isEligibleForFamily(benched, "gemini-", NOW)).toBe(false);
+    expect(isEligibleForFamily(benched, "3p-", NOW)).toBe(false);
+    expect(isEligibleForFamily(benched, null, NOW)).toBe(false);
   });
 
   it("refuses an account whose project was never assigned, whatever its status says", () => {
@@ -434,5 +478,83 @@ describe("isEligibleForFamily", () => {
     expect(familyBucketPrefix("gemini-3.8-flash")).toBe("gemini-");
     expect(familyBucketPrefix("claude-opus-4-6-thinking")).toBe("3p-");
     expect(familyBucketPrefix("unknown-model")).toBeNull();
+  });
+});
+
+describe("orderDecision — the single-eligible-account exception", () => {
+  it("admits a lone account benched by a throttle and counts it", () => {
+    // A throttle might already be over; a pool with nothing else to offer is better off
+    // asking than reporting the pool empty.
+    const throttled = account({
+      id: "throttled",
+      cooldowns: [cooling("gemini-", "transient_rate_limit", NOW + 30_000)],
+      quota: [bucket("gemini-5h", 0.4)],
+    });
+
+    const decision = orderDecision([throttled], "gemini-3.8-flash-high", NOW);
+
+    expect(decision.accounts.map((a) => a.id)).toEqual(["throttled"]);
+    expect(decision.relaxed).toBe(1);
+  });
+
+  it("never relaxes a quota wall", () => {
+    // Waiting politely does not refill a drained quota.
+    const benched = account({
+      id: "wall",
+      cooldowns: [cooling("gemini-", "quota", NOW + 3_600_000)],
+      quota: [bucket("gemini-5h", 0.4)],
+    });
+
+    const decision = orderDecision([benched], "gemini-3.8-flash-high", NOW);
+
+    expect(decision.accounts).toEqual([]);
+    expect(decision.relaxed).toBe(0);
+  });
+
+  it("does not relax while the normal pass can serve", () => {
+    const open = account({ id: "open", quota: [bucket("gemini-5h", 0.5)] });
+    const throttled = account({
+      id: "throttled",
+      cooldowns: [cooling("gemini-", "transient_rate_limit", NOW + 30_000)],
+      quota: [bucket("gemini-5h", 0.9)],
+    });
+
+    const decision = orderDecision([throttled, open], "gemini-3.8-flash-high", NOW);
+
+    expect(decision.accounts.map((a) => a.id)).toEqual(["open"]);
+    expect(decision.relaxed).toBe(0);
+  });
+
+  it("does not relax an account excluded for another reason too", () => {
+    // Zero quota waiting on its reset is not a throttle to be forgiven.
+    const drained = account({
+      id: "drained",
+      cooldowns: [cooling("gemini-", "transient_rate_limit", NOW + 30_000)],
+      quota: [{ ...bucket("gemini-5h", 0), resetAt: NOW + 1_000 }],
+    });
+
+    const decision = orderDecision([drained], "gemini-3.8-flash-high", NOW);
+
+    expect(decision.accounts).toEqual([]);
+    expect(decision.relaxed).toBe(0);
+  });
+
+  it("does not relax an account benched on another family", () => {
+    const benched = account({
+      id: "other-family",
+      cooldowns: [cooling("3p-", "transient_rate_limit", NOW + 30_000)],
+      quota: [bucket("gemini-5h", 0.4)],
+    });
+
+    const decision = orderDecision([benched], "gemini-3.8-flash-high", NOW);
+
+    expect(decision.accounts.map((a) => a.id)).toEqual(["other-family"]);
+    // It was never excluded here, so nothing was relaxed.
+    expect(decision.relaxed).toBe(0);
+  });
+
+  it("keeps order() returning the plain list", () => {
+    const open = account({ id: "open", quota: [bucket("gemini-5h", 0.5)] });
+    expect(order([open], "gemini-3.8-flash-high", NOW).map((a) => a.id)).toEqual(["open"]);
   });
 });

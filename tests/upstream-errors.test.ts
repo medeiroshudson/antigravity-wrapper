@@ -15,9 +15,13 @@ describe("classifyUpstream", () => {
     expect(err.retryAfterMs).toBeNull();
   });
 
-  it("treats a short reset window as transient throttling, not a wall", () => {
+  it("keeps the short wait the backend named on a transient throttle", () => {
     const err = classifyUpstream(429, '{"error":{"message":"Quota reached. Resets in 30s."}}');
+    // Dropping the hint made an attributed throttle indistinguishable from an
+    // unattributed one, so a real 30 s wait cooled nothing and the pool kept hammering
+    // the same account.
     expect(err.kind).toBe("transient_rate_limit");
+    expect(err.retryAfterMs).toBe(30_000);
   });
 
   it("keeps the wall and uses the long resetTime as cooldown", () => {
@@ -92,12 +96,13 @@ describe("classifyUpstream", () => {
     expect(wall.retryAfterMs).toBe(4 * 3_600_000 + 46 * 60_000 + 21_000);
   });
 
-  it("still treats a short 'reset after' window as transient throttling", () => {
+  it("still treats a short 'reset after' window as transient throttling, keeping the hint", () => {
     const throttled = classifyUpstream(
       429,
       '{"error":{"message":"Rate exceeded. Your quota will reset after 30s."}}',
     );
     expect(throttled.kind).toBe("transient_rate_limit");
+    expect(throttled.retryAfterMs).toBe(30_000);
   });
 
   it("treats the bare 'Resource has been exhausted' with no reset as transient throttling", () => {

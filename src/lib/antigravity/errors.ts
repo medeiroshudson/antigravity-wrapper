@@ -202,9 +202,11 @@ export function classifyUpstream(status: number, body: string): UpstreamError {
       retryAfterMs === null &&
       !/rate.?limit/i.test(text) &&
       /quota exceeded|exceeded your|limit reached|reached your|daily limit|individual quota/i.test(text);
-    return quotaWall
-      ? new UpstreamError("quota", status, text, null)
-      : new UpstreamError("transient_rate_limit", status, text);
+    if (quotaWall) return new UpstreamError("quota", status, text, null);
+    // The short wait the backend named travels with the verdict: dropping it made an
+    // attributed throttle indistinguishable from an unattributed one, so a real 30 s
+    // account wait cooled nothing and the pool kept hammering the same account.
+    return new UpstreamError("transient_rate_limit", status, text, retryAfterMs);
   }
   if (status === 401) return new UpstreamError("auth", status, text);
   if (status === 403) {

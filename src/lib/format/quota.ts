@@ -126,7 +126,12 @@ export function toLeanPoolQuota(
     const available = active.some((account) => {
       const familyRows = familyBuckets(account, prefix);
       if (familyRows.length === 0) return false;
-      const inActiveCooldown = account.status === "cooldown" && (account.cooldownUntil ?? 0) > now;
+      // A cooldown names its family: one that benches another family leaves this one
+      // available, and only `*` binds them all. Reading the projected `status` here
+      // reported a `gemini-` wall as a `3p-` one.
+      const inActiveCooldown = account.cooldowns.some(
+        (row) => row.until > now && (row.scope === "*" || row.scope === prefix),
+      );
       return !inActiveCooldown && familyRows.every((row) => row.remainingFraction > 0);
     });
 

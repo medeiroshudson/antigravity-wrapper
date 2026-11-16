@@ -1,4 +1,3 @@
-import { getCooldownTransientMs } from "../../config/index.js";
 import { applyCatalog } from "../../config/models.js";
 import { t } from "../../i18n/index.js";
 import {
@@ -12,7 +11,8 @@ import {
 import { fetchAvailableModels, retrieveUserQuotaSummary } from "../antigravity/quota.js";
 import { UpstreamError } from "../antigravity/errors.js";
 import { noopLogger, type Logger } from "../logger.js";
-import { order } from "./selector.js";
+import { cooldownDuration, cooldownPolicy } from "./cooldown-policy.js";
+import { familyBucketPrefix, orderDecision } from "./selector.js";
 import type { Account, AccountSnapshot, AccountStore } from "./store.js";
 
 const REFRESH_SKEW_MS = 5 * 60 * 1000;
@@ -134,7 +134,13 @@ export class AccountService {
   }
 
   async orderFor(runtimeModel: string): Promise<AccountSnapshot[]> {
-    return order(this.deps.store.snapshot(), runtimeModel, this.now());
+    const decision = orderDecision(this.deps.store.snapshot(), runtimeModel, this.now());
+    // Relaxing a cooldown is a decision worth seeing: it explains why a "cooling" account
+    // served when the pool had nothing else.
+    if (decision.relaxed > 0) {
+      this.logger.debug({ runtimeModel, relaxed: decision.relaxed }, "cooldowns relaxed");
+    }
+    return decision.accounts;
   }
 
   /**
@@ -145,14 +151,17 @@ export class AccountService {
   poolSummary(): { enabled: number; cooling: number; soonestCooldownUntil: number | null } {
     const now = this.now();
     const accounts = this.deps.store.listAccounts();
-    const enabled = accounts.filter((account) => account.enabled).length;
-    const cooldowns = accounts
-      .filter((account) => account.enabled && account.cooldownUntil !== null && account.cooldownUntil > now)
-      .map((account) => account.cooldownUntil as number);
+    // Read from the cooldown table, not from `status`: an account can now be cooling on
+    // one family while serving another, and the table is the only place that says which.
+    const cooldowns = this.deps.store.cooldowns(now);
+    const enabled = accounts.filter((account) => account.enabled);
+    const untils = enabled.flatMap((account) =>
+      (cooldowns.get(account.id) ?? []).map((row) => row.until),
+    );
     return {
-      enabled,
-      cooling: cooldowns.length,
-      soonestCooldownUntil: cooldowns.length > 0 ? Math.min(...cooldowns) : null,
+      enabled: enabled.length,
+      cooling: enabled.filter((account) => (cooldowns.get(account.id)?.length ?? 0) > 0).length,
+      soonestCooldownUntil: untils.length > 0 ? Math.min(...untils) : null,
     };
   }
 
@@ -164,18 +173,32 @@ export class AccountService {
    * Applies the effect of a failure to the account state (spec §11).
    * A license 403 is a wrapper configuration error, not the account's: it does not change state.
    * A TOS block is the opposite case: it is the account's alone, so it leaves the rotation.
+   *
+   * A bench is a fact about (account, scope, kind), never a boolean on the account: the
+   * scope is the model family that failed, so a drained `gemini-*` family leaves `3p-*`
+   * serving. `runtimeModel` is what names that family; without it (a verdict that arrives
+   * outside a turn, such as a probe) the bench is account-wide.
    */
-  applyFailure(id: string, error: UpstreamError): void {
-    const now = this.now();
+  applyFailure(id: string, error: UpstreamError, runtimeModel?: string): void {
+    const policy = cooldownPolicy(error.kind);
+    if (policy !== null) {
+      const now = this.now();
+      const scope = runtimeModel === undefined ? "*" : (familyBucketPrefix(runtimeModel) ?? "*");
+      // The streak is read before the write: one failure must count once, and the bench
+      // and the count are the same row.
+      const failures = this.deps.store.failureStreak(id, scope) + 1;
+      this.deps.store.recordFailure(id, {
+        scope,
+        kind: error.kind,
+        until:
+          failures >= policy.threshold
+            ? now + cooldownDuration(policy, error, this.deps.env ?? process.env)
+            : null,
+        reason: error.message,
+      });
+      return;
+    }
     switch (error.kind) {
-      case "quota":
-      case "transient_rate_limit":
-        this.deps.store.setStatus(id, "cooldown", {
-          cooldownUntil: now + (error.retryAfterMs ?? getCooldownTransientMs(this.deps.env)),
-          lastError: error.message,
-          statusKind: error.kind === "quota" ? "quota" : "rate_limited",
-        });
-        return;
       case "validation_required":
         this.deps.store.setStatus(id, "invalid", {
           lastError: t("account.validationRequired", { id }),
@@ -220,6 +243,18 @@ export class AccountService {
         // client_error, model_not_found, server_error, license: no state change.
         return;
     }
+  }
+
+  /**
+   * Drops the bench a successful turn proved over.
+   *
+   * Success is the only evidence that the wait ended early, and without this an account
+   * stays out of its family's rotation for the whole cooldown after it already recovered.
+   * Only the family that just served is released: the other family's bench was not tested.
+   */
+  clearCooldown(accountId: string, runtimeModel?: string): void {
+    const scope = runtimeModel === undefined ? undefined : (familyBucketPrefix(runtimeModel) ?? "*");
+    this.deps.store.clearCooldowns(accountId, scope);
   }
 
   /**

@@ -17,7 +17,7 @@ import { toIsoUtc, toResetPhrase } from "../lib/format/datetime.js";
 import { toGroupsView, toLeanPoolQuota } from "../lib/format/quota.js";
 import { toOpenAIErrorBody } from "../lib/openai-format/index.js";
 import { getAccountService, getStore } from "../lib/runtime.js";
-import { accountState, isUsable, type Account, type AccountStore } from "../lib/accounts/store.js";
+import { accountState, isUsable, type Account, type AccountStore, type CooldownRow } from "../lib/accounts/store.js";
 
 interface RouteDeps {
   env?: NodeJS.ProcessEnv;
@@ -30,10 +30,16 @@ interface RouteDeps {
  * the cooldown comes with its time remaining so a reader does not have to subtract
  * epochs, and the tier comes as an object whose `id` a caller can branch on (spec §10,
  * D15).
+ *
+ * `cooldowns` lists the rows behind the single effective `cooldownUntil`: one wait per
+ * (account, scope, kind), where `*` is the whole account and `gemini-`/`3p-` are the
+ * families. `cooldownUntil` stays as the widest of them so a reader that only needs "is
+ * this account waiting at all" keeps working.
  */
 function publicView(
   account: Account | undefined,
   now: number = Date.now(),
+  cooldowns: readonly CooldownRow[] = [],
 ): Record<string, unknown> | null {
   if (!account) return null;
   return {
@@ -54,6 +60,13 @@ function publicView(
         : { id: account.paidTierId, name: account.paidTierName },
     cooldownUntil: toIsoUtc(account.cooldownUntil),
     cooldownResetsIn: toResetPhrase(account.cooldownUntil, now),
+    cooldowns: cooldowns.map((row) => ({
+      scope: row.scope,
+      kind: row.kind,
+      until: toIsoUtc(row.until),
+      resetsIn: toResetPhrase(row.until, now),
+      reason: row.reason,
+    })),
     lastError: account.lastError,
     enabled: account.enabled,
     priority: account.priority,
@@ -96,6 +109,14 @@ export async function accountsRoutes(app: FastifyInstance, deps: RouteDeps = {})
     deps.store
       ? new AccountService({ store: deps.store, env: deps.env, fetchImpl: deps.fetchImpl })
       : getAccountService(deps.env);
+
+  /** `publicView` with the benches read from the table, so no caller can forget them. */
+  const view = (
+    account: Account | undefined,
+    at: number = Date.now(),
+    cooldowns?: readonly CooldownRow[],
+  ): Record<string, unknown> | null =>
+    publicView(account, at, cooldowns ?? (account ? store.cooldownsFor(account.id, at) : []));
 
   const notFound = (reply: FastifyReply): FastifyReply => {
     const mapped = toOpenAIErrorBody(new Error(t("account.notFound")), 404);
@@ -192,7 +213,7 @@ export async function accountsRoutes(app: FastifyInstance, deps: RouteDeps = {})
           .header("Location", `/admin/accounts/${account.id}/onboard`)
           .status(202)
           .send({
-            account: publicView(store.getAccount(account.id)),
+            account: view(store.getAccount(account.id)),
             onboarding: onboardingView(outcome),
           });
         return;
@@ -205,7 +226,7 @@ export async function accountsRoutes(app: FastifyInstance, deps: RouteDeps = {})
       }
 
       // No top-level paidTier: the account object carries it as { id, name } (spec §9.1).
-      reply.status(200).send({ account: publicView(store.getAccount(account.id)) });
+      reply.status(200).send({ account: view(store.getAccount(account.id)) });
     } catch (error) {
       // A dead refresh token is the one failure that escapes `onboard` (it records every
       // onboarding outcome itself); the caller cannot fix it by editing the request.
@@ -248,14 +269,14 @@ export async function accountsRoutes(app: FastifyInstance, deps: RouteDeps = {})
         const mapped = toOpenAIErrorBody(new Error(onboardingFailureMessage(outcome.code)), 502);
         reply.status(mapped.status).send({
           ...mapped.body,
-          account: publicView(store.getAccount(account.id)),
+          account: view(store.getAccount(account.id)),
           onboarding: onboardingView(outcome),
         });
         return;
       }
 
       reply.status(200).send({
-        account: publicView(store.getAccount(account.id)),
+        account: view(store.getAccount(account.id)),
         onboarding: onboardingView(outcome),
       });
     } catch (error) {
@@ -271,13 +292,19 @@ export async function accountsRoutes(app: FastifyInstance, deps: RouteDeps = {})
       );
       reply.status(mapped.status).send({
         ...mapped.body,
-        account: publicView(store.getAccount(account.id)),
+        account: view(store.getAccount(account.id)),
       });
     }
   });
 
   app.get("/admin/accounts", async (_request, reply) => {
-    reply.status(200).send({ accounts: store.listAccounts().map((account) => publicView(account)) });
+    const now = Date.now();
+    const cooldowns = store.cooldowns(now);
+    reply.status(200).send({
+      accounts: store
+        .listAccounts()
+        .map((account) => publicView(account, now, cooldowns.get(account.id) ?? [])),
+    });
   });
 
   app.get<{ Querystring: { detailed?: string } }>("/accounts/quota", async (request, reply) => {
@@ -289,7 +316,7 @@ export async function accountsRoutes(app: FastifyInstance, deps: RouteDeps = {})
       reply.status(200).send({
         ...lean,
         accounts: snapshots.map((account) => ({
-          ...publicView(account, now),
+          ...publicView(account, now, account.cooldowns),
           groups: toGroupsView(account.quota, now),
           quotaSummaryError: account.quotaSummaryError,
         })),
@@ -308,7 +335,7 @@ export async function accountsRoutes(app: FastifyInstance, deps: RouteDeps = {})
     reply.status(200).send({
       ...lean,
       accounts: snapshots.map((account) => ({
-        ...publicView(account, now),
+        ...publicView(account, now, account.cooldowns),
         groups: toGroupsView(account.quota, now),
         quotaSummaryError: account.quotaSummaryError,
       })),
@@ -320,7 +347,7 @@ export async function accountsRoutes(app: FastifyInstance, deps: RouteDeps = {})
     if (!account) return notFound(reply);
     const now = Date.now();
     reply.status(200).send({
-      account: publicView(account, now),
+      account: view(account, now),
       groups: toGroupsView(store.getQuota(account.id), now),
     });
   });
@@ -332,7 +359,7 @@ export async function accountsRoutes(app: FastifyInstance, deps: RouteDeps = {})
       if (!account) return notFound(reply);
       if (typeof request.body?.enabled === "boolean") store.setEnabled(account.id, request.body.enabled);
       if (typeof request.body?.priority === "number") store.setPriority(account.id, request.body.priority);
-      reply.status(200).send({ account: publicView(store.getAccount(account.id)) });
+      reply.status(200).send({ account: view(store.getAccount(account.id)) });
     },
   );
 
@@ -378,7 +405,7 @@ export async function accountsRoutes(app: FastifyInstance, deps: RouteDeps = {})
       }
 
       reply.status(200).send({
-        account: publicView(store.getAccount(account.id)),
+        account: view(store.getAccount(account.id)),
         probe,
       });
     } catch (error) {
@@ -401,7 +428,7 @@ export async function accountsRoutes(app: FastifyInstance, deps: RouteDeps = {})
     }
     try {
       await resolveService().refreshQuota(request.params.id);
-      reply.status(200).send({ account: publicView(store.getAccount(request.params.id)) });
+      reply.status(200).send({ account: view(store.getAccount(request.params.id)) });
     } catch (error) {
       const mapped = toOpenAIErrorBody(error, 502);
       reply.status(mapped.status).send(mapped.body);

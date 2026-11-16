@@ -288,6 +288,110 @@ describe("orderFor", () => {
   });
 });
 
+describe("scoped cooldowns", () => {
+  const NOW = 2_000_000_000_000;
+
+  function service(over: NodeJS.ProcessEnv = ENV): AccountService {
+    return new AccountService({ store, env: over, now: () => NOW });
+  }
+
+  it("benches only the family that failed", () => {
+    seed("a1");
+    service().applyFailure("a1", new UpstreamError("quota", 429, "quota wall", 7_200_000), "gemini-3.8-flash-low");
+
+    expect(store.cooldownsFor("a1", NOW)).toEqual([
+      { scope: "gemini-", kind: "quota", until: NOW + 7_200_000, reason: "quota wall", failures: 1 },
+    ]);
+    expect(store.getAccount("a1")?.statusKind).toBe("quota");
+  });
+
+  it("leaves the other family routable", async () => {
+    seed("a1");
+    service().applyFailure("a1", new UpstreamError("quota", 429, "quota wall", 7_200_000), "gemini-3.8-flash-low");
+
+    // Measured: one drained family used to take a fully-stocked one out of service.
+    expect((await service().orderFor("claude-opus-4-6-thinking")).map((a) => a.id)).toEqual(["a1"]);
+    expect(await service().orderFor("gemini-3.8-flash-low")).toEqual([]);
+  });
+
+  it("benches the whole account when the family is unmeasured", () => {
+    seed("a1");
+    service().applyFailure("a1", new UpstreamError("quota", 429, "quota wall", 60_000), "llama-4-scout");
+    expect(store.cooldownsFor("a1", NOW).map((row) => row.scope)).toEqual(["*"]);
+  });
+
+  it("names the wait the backend gave, and the policy default when it gave none", () => {
+    seed("a1");
+    service({ ...ENV, COOLDOWN_QUOTA_MS: "120000" }).applyFailure(
+      "a1",
+      new UpstreamError("quota", 429, "quota wall"),
+      "gemini-3.8-flash-low",
+    );
+    expect(store.cooldownsFor("a1", NOW)[0]?.until).toBe(NOW + 120_000);
+  });
+
+  it("clears only the family's cooldown when a turn succeeds there", () => {
+    seed("a1");
+    const svc = service();
+    svc.applyFailure("a1", new UpstreamError("quota", 429, "gemini wall", 60_000), "gemini-3.8-flash-low");
+    svc.applyFailure("a1", new UpstreamError("quota", 429, "3p wall", 60_000), "claude-opus-4-6-thinking");
+
+    svc.clearCooldown("a1", "gemini-3.8-flash-low");
+
+    expect(store.cooldownsFor("a1", NOW).map((row) => row.scope)).toEqual(["3p-"]);
+  });
+
+  it("clears every cooldown when the verdict belongs to the whole account", () => {
+    seed("a1");
+    const svc = service();
+    svc.applyFailure("a1", new UpstreamError("quota", 429, "wall", 60_000), "gemini-3.8-flash-low");
+    // A probe or an onboarding failure benches the account, not a family.
+    svc.applyFailure("a1", new UpstreamError("quota", 429, "wall", 60_000));
+    expect(store.cooldownsFor("a1", NOW).map((row) => row.scope).sort()).toEqual(["*", "gemini-"]);
+
+    svc.clearCooldown("a1");
+    expect(store.cooldownsFor("a1", NOW)).toEqual([]);
+  });
+
+  it("releases only the account-wide bench when the model family is unmeasured", () => {
+    seed("a1");
+    const svc = service();
+    svc.applyFailure("a1", new UpstreamError("quota", 429, "wall", 60_000), "gemini-3.8-flash-low");
+    svc.applyFailure("a1", new UpstreamError("quota", 429, "wall", 60_000));
+
+    // An unmeasured model proves nothing about `gemini-`; it only proves the account-wide
+    // wait is over.
+    svc.clearCooldown("a1", "llama-4-scout");
+
+    expect(store.cooldownsFor("a1", NOW).map((row) => row.scope)).toEqual(["gemini-"]);
+  });
+
+  it("relaxes a lone account benched by a throttle and logs it", async () => {
+    seed("a1");
+    const { logger, lines } = captureLogger();
+    const svc = new AccountService({ store, env: ENV, now: () => NOW, logger });
+    svc.applyFailure("a1", new UpstreamError("transient_rate_limit", 429, "slow down", 30_000), "gemini-3.8-flash-low");
+
+    expect((await svc.orderFor("gemini-3.8-flash-low")).map((a) => a.id)).toEqual(["a1"]);
+    const line = lines.find((l) => l.msg === "cooldowns relaxed");
+    expect(line?.level).toBe("debug");
+    expect(line?.obj).toMatchObject({ runtimeModel: "gemini-3.8-flash-low", relaxed: 1 });
+  });
+
+  it("reports the pool as cooling from the table", () => {
+    seed("a1");
+    seed("a2");
+    const svc = service();
+    svc.applyFailure("a1", new UpstreamError("transient_rate_limit", 429, "slow down", 60_000), "gemini-3.8-flash-low");
+
+    expect(svc.poolSummary()).toEqual({
+      enabled: 2,
+      cooling: 1,
+      soonestCooldownUntil: NOW + 60_000,
+    });
+  });
+});
+
 describe("refreshQuota", () => {
   const SUMMARY = {
     groups: [

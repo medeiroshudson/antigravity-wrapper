@@ -2,8 +2,13 @@ import { describe, expect, it } from "vitest";
 import { failureScope, refusalKey } from "../src/lib/antigravity/scope.js";
 import { UpstreamError, type UpstreamFailureKind } from "../src/lib/antigravity/errors.js";
 
-function errorOf(kind: UpstreamFailureKind, status = 429, message = "x"): UpstreamError {
-  return new UpstreamError(kind, status, message);
+function errorOf(
+  kind: UpstreamFailureKind,
+  status = 429,
+  message = "x",
+  retryAfterMs: number | null = null,
+): UpstreamError {
+  return new UpstreamError(kind, status, message, retryAfterMs);
 }
 
 describe("failureScope", () => {
@@ -20,9 +25,23 @@ describe("failureScope", () => {
   });
 
   it("charges the account for failures that are about its own state", () => {
-    for (const kind of ["auth", "validation_required", "account_blocked", "quota", "transient_rate_limit"] as const) {
+    for (const kind of ["auth", "validation_required", "account_blocked", "quota"] as const) {
       expect(failureScope(errorOf(kind))).toBe("account");
     }
+  });
+
+  it("charges the account for a throttle the backend attributed a wait to", () => {
+    // With a reset hint the backend named this account's own wait, so retrying elsewhere
+    // would only hide it: the account is what has to stop.
+    expect(failureScope(errorOf("transient_rate_limit", 429, "slow down", 30_000))).toBe("account");
+  });
+
+  it("leaves an unattributed throttle to the request", () => {
+    // Without a hint the same body answers for every account (measured 2026-11-15), so
+    // there is nothing account-shaped to charge.
+    expect(failureScope(errorOf("transient_rate_limit", 429, "Resource has been exhausted"))).toBe(
+      "request",
+    );
   });
 });
 

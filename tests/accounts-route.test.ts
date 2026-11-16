@@ -847,6 +847,16 @@ describe("management", () => {
 
     expect(account.cooldownUntil).toBe("2099-01-01T00:00:00Z");
     expect(typeof account.cooldownResetsIn).toBe("string");
+    // The effective bench and the rows behind it: one wait per (account, scope, kind).
+    expect(account.cooldowns).toEqual([
+      {
+        scope: "*",
+        kind: "quota",
+        until: "2099-01-01T00:00:00Z",
+        resetsIn: expect.any(String),
+        reason: null,
+      },
+    ]);
     expect(account.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
     expect(account.lastUsedAt).toBeNull();
   });

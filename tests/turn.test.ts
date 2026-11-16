@@ -26,6 +26,7 @@ function snapshot(id: string): AccountSnapshot {
     createdAt: 0,
     lastUsedAt: null,
     quota: [],
+    cooldowns: [],
   };
 }
 
@@ -85,6 +86,7 @@ function service(accounts: AccountSnapshot[]): AccountService {
     ensureFresh: vi.fn(async (a: AccountSnapshot) => a),
     markUsed: vi.fn(),
     applyFailure: vi.fn(),
+    clearCooldown: vi.fn(),
     // The runner fires a best-effort quota refresh after a 429 (spec §9.3).
     refreshQuota: vi.fn(async () => undefined),
   } as unknown as AccountService;
@@ -131,6 +133,7 @@ describe("TurnRunner", () => {
       ensureFresh: vi.fn(async (a: AccountSnapshot) => a),
       markUsed: vi.fn(),
       applyFailure: vi.fn(),
+      clearCooldown: vi.fn(),
       refreshQuota: vi.fn(async () => undefined),
     } as unknown as AccountService;
     const runner = new TurnRunner({ accounts, fetchImpl, identities: new ConversationRegistry() });
@@ -527,6 +530,62 @@ describe("TurnRunner", () => {
     expect(error).toBeInstanceOf(AllAccountsFailedError);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(accounts.applyFailure).not.toHaveBeenCalled();
+  });
+
+  it("benches an account the backend attributed the throttle to, and fails over", async () => {
+    // Measured 2026-11-15 (the other half): a 429 that names a wait is this account's,
+    // so dropping the hint made the pool keep hammering it forever.
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+      const auth = String(((init?.headers as Record<string, string> | undefined)?.Authorization) ?? "");
+      return auth.includes("tok-a1")
+        ? new Response('{"error":{"message":"Quota reached. Resets in 30s."}}', { status: 429 })
+        : sse(TEXT_SSE);
+    }) as unknown as typeof fetch;
+    const accounts = service([snapshot("a1"), snapshot("a2")]);
+    const runner = new TurnRunner({ accounts, fetchImpl });
+
+    const { accountId } = await runner.run(BASE);
+
+    expect(accountId).toBe("a2");
+    const applyFailure = accounts.applyFailure as unknown as ReturnType<typeof vi.fn>;
+    expect(applyFailure).toHaveBeenCalledTimes(1);
+    const [failedId, failure, runtimeModel] = applyFailure.mock.calls[0] as [
+      string,
+      { kind: string; retryAfterMs: number | null },
+      string,
+    ];
+    expect(failedId).toBe("a1");
+    expect(failure).toMatchObject({ kind: "transient_rate_limit", retryAfterMs: 30_000 });
+    // The bench is scoped by the model family, so the runner must hand the model over.
+    expect(runtimeModel).toBe("gemini-3.8-flash-low");
+  });
+
+  it("does not blame the request for a throttle only one account was given", async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response('{"error":{"message":"Quota reached. Resets in 30s."}}', { status: 429 }),
+    ) as unknown as typeof fetch;
+    const accounts = service([snapshot("a1"), snapshot("a2"), snapshot("a3")]);
+    const runner = new TurnRunner({ accounts, fetchImpl });
+
+    const error = await runner.run(BASE).catch((e: unknown) => e);
+
+    // Each account named its own wait, so there is no shared verdict to stop on: the
+    // pool walks on and every account that refused is charged.
+    expect(error).toBeInstanceOf(AllAccountsFailedError);
+    expect(error).not.toBeInstanceOf(RequestRefusedError);
+    expect(accounts.applyFailure).toHaveBeenCalledTimes(3);
+  });
+
+  it("clears the family's cooldown on the account that served the turn", async () => {
+    const fetchImpl = vi.fn(async () => sse(TEXT_SSE)) as unknown as typeof fetch;
+    const accounts = service([snapshot("a1")]);
+    const runner = new TurnRunner({ accounts, fetchImpl });
+
+    await runner.run(BASE);
+
+    // Success is the only evidence that the wait is over; without this the account stays
+    // benched for the whole cooldown after it already recovered.
+    expect(accounts.clearCooldown).toHaveBeenCalledWith("a1", "gemini-3.8-flash-low");
   });
 
   it("stops at the second identical refusal: the verdict is the request's, not the account's", async () => {

@@ -22,6 +22,7 @@ function snapshot(id: string): AccountSnapshot {
     createdAt: 0,
     lastUsedAt: null,
     quota: [],
+    cooldowns: [],
   };
 }
 
@@ -42,6 +43,7 @@ function service(accounts: AccountSnapshot[]): AccountService {
     ensureFresh: vi.fn(async (a: AccountSnapshot) => a),
     markUsed: vi.fn(),
     applyFailure: vi.fn(),
+    clearCooldown: vi.fn(),
     refreshQuota: vi.fn(async () => undefined),
   } as unknown as AccountService;
 }
