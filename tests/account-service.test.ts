@@ -192,16 +192,18 @@ describe("applyFailure", () => {
   });
 
   it("records the cause alongside the state, so a parked account is explainable", () => {
-    seed();
+    seed("a1");
+    seed("a2");
+    seed("a3");
     const service = new AccountService({ store, env: ENV });
     service.applyFailure("a1", new UpstreamError("quota", 429, "quota", 7_200_000));
     expect(store.getAccount("a1")?.statusKind).toBe("quota");
 
-    service.applyFailure("a1", new UpstreamError("transient_rate_limit", 429, "slow down"));
-    expect(store.getAccount("a1")?.statusKind).toBe("rate_limited");
+    service.applyFailure("a2", new UpstreamError("transient_rate_limit", 429, "slow down"));
+    expect(store.getAccount("a2")?.statusKind).toBe("rate_limited");
 
-    service.applyFailure("a1", new UpstreamError("auth", 401, "expired"));
-    expect(store.getAccount("a1")?.statusKind).toBe("auth");
+    service.applyFailure("a3", new UpstreamError("auth", 401, "expired"));
+    expect(store.getAccount("a3")?.statusKind).toBe("auth");
   });
 
   it("places account in cooldown on transient_rate_limit", () => {

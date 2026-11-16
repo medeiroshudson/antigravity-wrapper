@@ -443,20 +443,29 @@ export class AccountStore {
         `INSERT INTO account_cooldowns (account_id, scope, kind, until, reason, failures)
          VALUES (?, ?, ?, ?, ?, 1)
          ON CONFLICT(account_id, scope) DO UPDATE SET
-           kind = excluded.kind,
-           reason = excluded.reason,
-           until = CASE WHEN excluded.until > 0 THEN excluded.until ELSE account_cooldowns.until END,
+           kind = CASE
+             WHEN excluded.until = 0 AND account_cooldowns.until > 0 THEN account_cooldowns.kind
+             WHEN account_cooldowns.kind = 'quota' AND excluded.kind != 'quota' AND account_cooldowns.until >= excluded.until THEN account_cooldowns.kind
+             ELSE excluded.kind
+           END,
+           reason = CASE
+             WHEN excluded.until = 0 AND account_cooldowns.until > 0 THEN account_cooldowns.reason
+             WHEN account_cooldowns.kind = 'quota' AND excluded.kind != 'quota' AND account_cooldowns.until >= excluded.until THEN account_cooldowns.reason
+             WHEN excluded.until < account_cooldowns.until AND account_cooldowns.until > 0 THEN account_cooldowns.reason
+             ELSE COALESCE(excluded.reason, account_cooldowns.reason)
+           END,
+           until = MAX(account_cooldowns.until, excluded.until),
            failures = account_cooldowns.failures + 1`,
       )
       .run(accountId, input.scope, input.kind, input.until ?? 0, input.reason);
-    if (input.reason !== null) {
+    const row = this.db
+      .prepare("SELECT failures, reason FROM account_cooldowns WHERE account_id = ? AND scope = ?")
+      .get(accountId, input.scope) as { failures: number; reason: string | null } | undefined;
+    if (row?.reason !== undefined && row.reason !== null) {
       // The row is deleted when the bench expires, but the reason is why the account was
       // parked at all: keeping it on the account is what leaves history after the row goes.
-      this.db.prepare("UPDATE accounts SET last_error = ? WHERE id = ?").run(input.reason, accountId);
+      this.db.prepare("UPDATE accounts SET last_error = ? WHERE id = ?").run(row.reason, accountId);
     }
-    const row = this.db
-      .prepare("SELECT failures FROM account_cooldowns WHERE account_id = ? AND scope = ?")
-      .get(accountId, input.scope) as { failures: number } | undefined;
     return row?.failures ?? 1;
   }
 

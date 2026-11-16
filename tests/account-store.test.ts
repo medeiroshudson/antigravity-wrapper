@@ -433,6 +433,94 @@ describe("AccountStore scoped cooldowns", () => {
     });
   });
 
+  it("does not shorten an active quota wall or downgrade its kind on subsequent transient failures", () => {
+    add();
+    store.recordFailure("a1", {
+      scope: "gemini-",
+      kind: "quota",
+      until: NOW + 100_000,
+      reason: "quota wall",
+    });
+
+    // A shorter transient throttle arrives concurrently or during relaxation probe
+    store.recordFailure("a1", {
+      scope: "gemini-",
+      kind: "transient_rate_limit",
+      until: NOW + 20_000,
+      reason: "rate limited",
+    });
+
+    const cooldowns = store.cooldownsFor("a1", NOW);
+    expect(cooldowns).toHaveLength(1);
+    expect(cooldowns[0]).toEqual({
+      scope: "gemini-",
+      kind: "quota",
+      until: NOW + 100_000,
+      reason: "quota wall",
+      failures: 2,
+    });
+    // The projected account lastError and statusKind preserve the quota wall
+    expect(store.getAccount("a1")).toMatchObject({
+      status: "cooldown",
+      statusKind: "quota",
+      cooldownUntil: NOW + 100_000,
+      lastError: "quota wall",
+    });
+  });
+
+  it("does not overwrite an active bench when a count-only failure arrives", () => {
+    add();
+    store.recordFailure("a1", {
+      scope: "gemini-",
+      kind: "quota",
+      until: NOW + 50_000,
+      reason: "quota wall",
+    });
+
+    // Count-only failure (until: null) arrives
+    store.recordFailure("a1", {
+      scope: "gemini-",
+      kind: "transient_rate_limit",
+      until: null,
+      reason: "just counting",
+    });
+
+    const cooldowns = store.cooldownsFor("a1", NOW);
+    expect(cooldowns[0]).toEqual({
+      scope: "gemini-",
+      kind: "quota",
+      until: NOW + 50_000,
+      reason: "quota wall",
+      failures: 2,
+    });
+  });
+
+  it("upgrades a transient cooldown to quota when a quota wall is hit", () => {
+    add();
+    store.recordFailure("a1", {
+      scope: "gemini-",
+      kind: "transient_rate_limit",
+      until: NOW + 20_000,
+      reason: "rate limited",
+    });
+
+    store.recordFailure("a1", {
+      scope: "gemini-",
+      kind: "quota",
+      until: NOW + 60_000,
+      reason: "quota wall",
+    });
+
+    const cooldowns = store.cooldownsFor("a1", NOW);
+    expect(cooldowns[0]).toEqual({
+      scope: "gemini-",
+      kind: "quota",
+      until: NOW + 60_000,
+      reason: "quota wall",
+      failures: 2,
+    });
+  });
+
   it("goes back to active when the only bench expires, keeping the reason", () => {
     add();
     store.recordFailure("a1", {
