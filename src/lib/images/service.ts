@@ -7,11 +7,19 @@ import {
   UpstreamError,
 } from "../antigravity/errors.js";
 import { antigravityHeaders } from "../antigravity/rpc.js";
+import { failureScope } from "../antigravity/scope.js";
 import { AllAccountsFailedError } from "../chat/turn.js";
 import { noopLogger, type Logger } from "../logger.js";
 import { buildImageEnvelope, parseAspectRatio } from "./envelope.js";
 
 export { AllAccountsFailedError } from "../chat/turn.js";
+
+/**
+ * The model every image request is routed with. It names the quota family the account is
+ * benched on, so a failure here never parks the whole account: `gemini-` is draining, and
+ * `3p-` was never asked.
+ */
+const IMAGE_MODEL = "gemini-3.1-flash-image";
 
 export interface GenerateImageResult {
   b64Json: string;
@@ -43,13 +51,26 @@ export class ImageService {
   private applyFailure(accountId: string, error: UpstreamError): void {
     const service = this.deps.accountService as unknown as Record<string, unknown>;
     if (typeof service.applyFailure === "function") {
-      service.applyFailure(accountId, error);
+      // The model travels with the verdict so the bench lands on its family, not on the
+      // account: an image request that drained `gemini-` says nothing about `3p-`.
+      (service.applyFailure as (id: string, failure: UpstreamError, model?: string) => void)(
+        accountId,
+        error,
+        IMAGE_MODEL,
+      );
     } else if (typeof service.markCooldown === "function") {
       service.markCooldown(accountId, error);
     }
 
     if (error.status === 429 && typeof service.refreshQuota === "function") {
       void (service.refreshQuota as (id: string) => Promise<unknown>)(accountId).catch(() => undefined);
+    }
+  }
+
+  private clearCooldown(accountId: string): void {
+    const service = this.deps.accountService as unknown as Record<string, unknown>;
+    if (typeof service.clearCooldown === "function") {
+      (service.clearCooldown as (id: string, model?: string) => void)(accountId, IMAGE_MODEL);
     }
   }
 
@@ -76,7 +97,7 @@ export class ImageService {
   }
 
   private async generateSingle(prompt: string, options?: GenerateImageOptions): Promise<GenerateImageResult> {
-    const candidates = await this.deps.accountService.orderFor("gemini-3.1-flash-image");
+    const candidates = await this.deps.accountService.orderFor(IMAGE_MODEL);
     if (!candidates || candidates.length === 0) {
       throw new AllAccountsFailedError([]);
     }
@@ -113,6 +134,8 @@ export class ImageService {
 
         const result = await this.executeUpstream(candidate.id, headers, body, prompt, options?.signal);
         this.markUsed(candidate.id);
+        // Serving the family is the evidence its wait is over.
+        this.clearCooldown(candidate.id);
         return result;
       } catch (error) {
         if (error instanceof ClientDisconnectedError) {
@@ -124,7 +147,12 @@ export class ImageService {
             throw error;
           }
 
-          this.applyFailure(candidate.id, error);
+          // A verdict any account would repeat is not this account's, so it benches
+          // nothing: cooling on it is what took three accounts out of the pool per request
+          // on 2026-11-15. The loop still tries the next account, as the chat path does.
+          if (failureScope(error) === "account") {
+            this.applyFailure(candidate.id, error);
+          }
           failures.push({
             accountId: candidate.id,
             kind: error.kind,

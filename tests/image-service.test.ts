@@ -93,7 +93,13 @@ describe("ImageService", () => {
 
     const result = await service.generate("A mountain", {});
     expect(result[0]?.b64Json).toBe("acc2-image");
-    expect(mockAccountService.applyFailure).toHaveBeenCalledWith("acc-1", expect.any(UpstreamError));
+    // The model travels with the verdict: the bench belongs to the `gemini-` family, not
+    // to the whole account.
+    expect(mockAccountService.applyFailure).toHaveBeenCalledWith(
+      "acc-1",
+      expect.any(UpstreamError),
+      "gemini-3.1-flash-image",
+    );
     expect(mockAccountService.markUsed).toHaveBeenCalledWith("acc-2");
   });
 
@@ -134,10 +140,9 @@ describe("ImageService", () => {
 
     const result = await service.generate("A valley", {});
     expect(result[0]?.b64Json).toBe("recovered-5xx-image");
-    expect(mockAccountService.applyFailure).toHaveBeenCalledWith(
-      "acc-1",
-      expect.objectContaining({ status: 500 }),
-    );
+    // A `5xx` describes the channel, not the credential: it fails over and benches nothing.
+    // Cooling on it took accounts out of the pool for an outage that was not theirs.
+    expect(mockAccountService.applyFailure).not.toHaveBeenCalled();
     expect(mockAccountService.markUsed).toHaveBeenCalledWith("acc-2");
   });
 
@@ -318,6 +323,87 @@ describe("ImageService", () => {
     await expect(service.generate("empty pool test")).rejects.toBeInstanceOf(AllAccountsFailedError);
   });
 
+  it("does not bench an account for a throttle the backend did not attribute", async () => {
+    // The same body answers for every account (measured 2026-11-15), so the verdict is the
+    // request's: no cooldown, and the request still moves to the next account.
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 429,
+        text: async () => '{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota)."}}',
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          response: {
+            candidates: [
+              { content: { parts: [{ inlineData: { mimeType: "image/jpeg", data: "second-account" } }] } },
+            ],
+          },
+        }),
+      });
+
+    const mockAccountService = {
+      orderFor: vi.fn().mockResolvedValue([
+        { id: "acc-1", email: "user1@test.com" },
+        { id: "acc-2", email: "user2@test.com" },
+      ]),
+      ensureFresh: vi.fn().mockImplementation((acc) => ({
+        id: acc.id,
+        accessToken: `token-${acc.id}`,
+        projectId: "aicode-consumers",
+      })),
+      markUsed: vi.fn(),
+      applyFailure: vi.fn(),
+      clearCooldown: vi.fn(),
+    };
+
+    const service = new ImageService({
+      accountService: mockAccountService as any,
+      fetchImpl: mockFetch as any,
+    });
+
+    const result = await service.generate("A lighthouse", {});
+    expect(result[0]?.b64Json).toBe("second-account");
+    expect(mockAccountService.applyFailure).not.toHaveBeenCalled();
+  });
+
+  it("clears the family's cooldown when an image is served", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        response: {
+          candidates: [
+            { content: { parts: [{ inlineData: { mimeType: "image/jpeg", data: "served" } }] } },
+          ],
+        },
+      }),
+    });
+
+    const mockAccountService = {
+      orderFor: vi.fn().mockResolvedValue([{ id: "acc-1", email: "user@test.com" }]),
+      ensureFresh: vi.fn().mockResolvedValue({
+        id: "acc-1",
+        accessToken: "token-acc-1",
+        projectId: "aicode-consumers",
+      }),
+      markUsed: vi.fn(),
+      applyFailure: vi.fn(),
+      clearCooldown: vi.fn(),
+    };
+
+    const service = new ImageService({
+      accountService: mockAccountService as any,
+      fetchImpl: mockFetch as any,
+    });
+
+    await service.generate("A bridge", {});
+    expect(mockAccountService.clearCooldown).toHaveBeenCalledWith("acc-1", "gemini-3.1-flash-image");
+  });
+
   it("throws AllAccountsFailedError when all accounts in pool fail", async () => {
     const mockFetch = vi
       .fn()
@@ -345,6 +431,12 @@ describe("ImageService", () => {
     const error = await service.generate("fail all test").catch((e) => e);
     expect(error).toBeInstanceOf(AllAccountsFailedError);
     expect((error as AllAccountsFailedError).failures).toHaveLength(2);
-    expect(mockAccountService.applyFailure).toHaveBeenCalledTimes(2);
+    // One bench: the quota wall on `acc-1`. The `503` from `acc-2` is the channel's.
+    expect(mockAccountService.applyFailure).toHaveBeenCalledTimes(1);
+    expect(mockAccountService.applyFailure).toHaveBeenCalledWith(
+      "acc-1",
+      expect.any(UpstreamError),
+      "gemini-3.1-flash-image",
+    );
   });
 });

@@ -1063,7 +1063,7 @@ curl -s http://127.0.0.1:3000/v1/images/generations \
 - **Delivery Formats (`response_format`):**
   - `"b64_json"` (default): Returns base64 JPEG data directly in `data[].b64_json`.
   - `"url"`: Returns an RFC 2397 Data URI in `data[].url` (`data:image/jpeg;base64,...`), providing instant preview and download compatibility in web UIs without external S3/GCS hosting.
-- **Account Pool & Failover:** Image generation participates in pool load balancing against the Gemini quota bucket (`gemini-5h` / `gemini-weekly`) with automatic failover across accounts on HTTP 429/5xx.
+- **Account Pool & Failover:** Image generation participates in pool load balancing against the Gemini quota bucket (`gemini-5h` / `gemini-weekly`) with automatic failover across accounts on HTTP 429/5xx. A failure benches the `gemini-` family only, never the whole account, and a `429` with no reset hint belongs to the request: it fails over without cooling anything (see [Cooldowns are per (account, scope, kind)](#how-load-balancing-works)).
 - **Safety Handling:** When a prompt violates upstream content policies, the service immediately returns HTTP 400 `invalid_request_error` with `code: "content_policy_violation"` without burning pool quota or failing over to subsequent accounts.
 
 ### Using with the OpenAI Python SDK
