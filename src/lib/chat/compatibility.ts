@@ -202,7 +202,7 @@ function relocate(rule: CompatibilityRule, input: ChatInput): ChatInput | Compat
 
 /**
  * Aplica as regras conforme o modo. `off` não avalia nada; `log` avalia e reporta sem mudar
- * o request; `on` aplica a primeira regra que casar.
+ * o request; `on` aplica todas as regras que casarem, em sequência.
  *
  * Idempotência: a realocação esvazia a `systemInstruction` e a máscara remove o literal, então
  * uma segunda passagem não encontra o que casar e não faz nada.
@@ -213,36 +213,39 @@ export function applyCompatibility<T extends ChatInput>(
 ): { input: T; hits: CompatibilityHit[] } {
   if (mode === "off") return { input, hits: [] };
 
+  let current = input;
+  const hits: CompatibilityHit[] = [];
+
   for (const rule of RULES) {
     if (rule.when.field === "systemInstruction") {
-      if (!matches(rule, input.systemInstruction)) continue;
-      const chars = input.systemInstruction.length;
+      if (!matches(rule, current.systemInstruction)) continue;
+      const chars = current.systemInstruction.length;
 
       if (mode === "log") {
-        return { input, hits: [{ ruleId: rule.id, chars, applied: false, skipped: "log-only" }] };
+        hits.push({ ruleId: rule.id, chars, applied: false, skipped: "log-only" });
+        continue;
       }
 
-      const result = relocate(rule, input);
+      const result = relocate(rule, current);
       if (typeof result === "string") {
-        return { input, hits: [{ ruleId: rule.id, chars, applied: false, skipped: result }] };
+        hits.push({ ruleId: rule.id, chars, applied: false, skipped: result });
+        continue;
       }
-      return { input: { ...input, ...result }, hits: [{ ruleId: rule.id, chars, applied: true }] };
+      current = { ...current, ...result };
+      hits.push({ ruleId: rule.id, chars, applied: true });
+      continue;
     }
 
-    const masked = maskContents(rule, input.contents);
+    const masked = maskContents(rule, current.contents);
     if (masked.chars === 0) continue;
 
     if (mode === "log") {
-      return {
-        input,
-        hits: [{ ruleId: rule.id, chars: masked.chars, applied: false, skipped: "log-only" }],
-      };
+      hits.push({ ruleId: rule.id, chars: masked.chars, applied: false, skipped: "log-only" });
+      continue;
     }
-    return {
-      input: { ...input, contents: masked.contents },
-      hits: [{ ruleId: rule.id, chars: masked.chars, applied: true }],
-    };
+    current = { ...current, contents: masked.contents };
+    hits.push({ ruleId: rule.id, chars: masked.chars, applied: true });
   }
 
-  return { input, hits: [] };
+  return { input: current, hits };
 }
