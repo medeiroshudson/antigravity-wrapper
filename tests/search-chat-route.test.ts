@@ -102,4 +102,135 @@ describe("POST /v1/chat/completions with web_search", () => {
     expect(body.warnings.some((w: any) => w.field === "web_search" && w.reason.includes("Gemini"))).toBe(true);
     expect(capturedBody.request.tools).toBeUndefined();
   });
+
+  it.each(["web_search_preview", "web_search"] as const)(
+    "treats tools[{type: %s}] as a grounding switch on Gemini without emitting functionDeclarations",
+    async (toolType) => {
+      let capturedBody: any;
+      const mockFetch = async (_url: string, init: any) => {
+        capturedBody = JSON.parse(init.body);
+        return {
+          ok: true,
+          status: 200,
+          body: new ReadableStream({
+            start(controller) {
+              controller.enqueue(
+                new TextEncoder().encode(
+                  `data: {"response":{"candidates":[{"content":{"parts":[{"text":"Result"}]}}]}}\n\n`,
+                ),
+              );
+              controller.close();
+            },
+          }),
+        };
+      };
+
+      const server = buildServer("test-key", { store, fetchImpl: mockFetch as any, logger: false });
+      const res = await server.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: { authorization: "Bearer test-key" },
+        payload: {
+          model: "gemini-3.5-flash-lite",
+          messages: [{ role: "user", content: "Cotacao do dolar hoje" }],
+          tools: [{ type: toolType }],
+        },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.warnings?.some((w: any) => w.field === "web_search")).toBeFalsy();
+      expect(capturedBody.request.tools).toEqual([{ googleSearch: {} }]);
+    },
+  );
+
+  it("keeps real function declarations and injects googleSearch on mixed tools", async () => {
+    let capturedBody: any;
+    const mockFetch = async (_url: string, init: any) => {
+      capturedBody = JSON.parse(init.body);
+      return {
+        ok: true,
+        status: 200,
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(
+              new TextEncoder().encode(
+                `data: {"response":{"candidates":[{"content":{"parts":[{"text":"Result"}]}}]}}\n\n`,
+              ),
+            );
+            controller.close();
+          },
+        }),
+      };
+    };
+
+    const server = buildServer("test-key", { store, fetchImpl: mockFetch as any, logger: false });
+    const res = await server.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: { authorization: "Bearer test-key" },
+      payload: {
+        model: "gemini-3.5-flash-lite",
+        messages: [{ role: "user", content: "Clima e noticias" }],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "get_weather",
+              description: "Get weather",
+              parameters: { type: "object", properties: { city: { type: "string" } } },
+            },
+          },
+          { type: "web_search_preview" },
+        ],
+        tool_choice: { type: "function", function: { name: "web_search_preview" } },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(capturedBody.request.tools).toContainEqual({ googleSearch: {} });
+    const fnTool = capturedBody.request.tools.find((t: any) => Array.isArray(t.functionDeclarations));
+    expect(fnTool?.functionDeclarations).toHaveLength(1);
+    expect(fnTool?.functionDeclarations[0]?.name).toBe("get_weather");
+    const sysText = capturedBody.request.systemInstruction?.parts?.map((p: any) => p.text).join("\n") ?? "";
+    expect(sysText).not.toContain("web_search_preview");
+  });
+
+  it("warns and does not inject googleSearch when tools[{type: web_search_preview}] is sent to Claude", async () => {
+    let capturedBody: any;
+    const mockFetch = async (_url: string, init: any) => {
+      capturedBody = JSON.parse(init.body);
+      return {
+        ok: true,
+        status: 200,
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(
+              new TextEncoder().encode(
+                `data: {"response":{"candidates":[{"content":{"parts":[{"text":"Claude response"}]}}]}}\n\n`,
+              ),
+            );
+            controller.close();
+          },
+        }),
+      };
+    };
+
+    const server = buildServer("test-key", { store, fetchImpl: mockFetch as any, logger: false });
+    const res = await server.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: { authorization: "Bearer test-key" },
+      payload: {
+        model: "claude-sonnet-4-6",
+        messages: [{ role: "user", content: "Hello" }],
+        tools: [{ type: "web_search_preview" }],
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.warnings?.some((w: any) => w.field === "web_search" && w.reason.includes("Gemini"))).toBe(true);
+    expect(capturedBody.request.tools).toBeUndefined();
+  });
 });

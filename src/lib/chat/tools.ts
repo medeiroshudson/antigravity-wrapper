@@ -18,10 +18,21 @@ export interface BuildFunctionDeclarationsResult {
 /** Allowlist for the legacy `parameters` field (spec §8). */
 const LEGACY_ALLOW = new Set(["type", "description", "properties", "required", "items", "enum"]);
 
+const WEB_SEARCH_TOOL_TYPES = new Set(["web_search", "web_search_preview"]);
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+export function hasWebSearchTool(body: unknown): boolean {
+  const record = asRecord(body);
+  const tools = record && Array.isArray(record.tools) ? record.tools : [];
+  return tools.some((raw) => {
+    const tool = asRecord(raw);
+    return typeof tool?.type === "string" && WEB_SEARCH_TOOL_TYPES.has(tool.type);
+  });
 }
 
 export function extractToolDefs(body: unknown): ToolDef[] {
@@ -30,6 +41,7 @@ export function extractToolDefs(body: unknown): ToolDef[] {
   const out: ToolDef[] = [];
   for (const raw of tools) {
     const tool = asRecord(raw);
+    if (typeof tool?.type === "string" && WEB_SEARCH_TOOL_TYPES.has(tool.type)) continue;
     const fn = tool ? asRecord(tool.function) : null;
     if (!fn || typeof fn.name !== "string" || fn.name.length === 0) continue;
     out.push({
@@ -46,7 +58,9 @@ export function toolChoiceMode(choice: unknown): "none" | "required" | "auto" | 
   if (choice === "required") return "required";
   const record = asRecord(choice);
   const fn = record ? asRecord(record.function) : null;
-  if (record?.type === "function" && fn && typeof fn.name === "string") return { name: fn.name };
+  if (record?.type === "function" && fn && typeof fn.name === "string") {
+    return WEB_SEARCH_TOOL_TYPES.has(fn.name) ? "auto" : { name: fn.name };
+  }
   return "auto";
 }
 
