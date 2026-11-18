@@ -3,6 +3,7 @@ import {
   assertSafeBaseUrl,
   endpointCandidates,
   getBodyLimitBytes,
+  getCompatibilityMode,
   getLogLevel,
   getMaxFailoverAttempts,
   getStreamFlushPatienceMs,
@@ -11,6 +12,19 @@ import {
   redact,
   resolveApiKey,
 } from "../src/config/index.js";
+
+describe("getCompatibilityMode", () => {
+  it("defaults to on, so compatibility ships plug-and-play", () => {
+    expect(getCompatibilityMode({})).toBe("on");
+    expect(getCompatibilityMode({ COMPATIBILITY: "nonsense" })).toBe("on");
+  });
+
+  it("keeps off and log reachable explicitly", () => {
+    expect(getCompatibilityMode({ COMPATIBILITY: "off" })).toBe("off");
+    expect(getCompatibilityMode({ COMPATIBILITY: " OFF " })).toBe("off");
+    expect(getCompatibilityMode({ COMPATIBILITY: "log" })).toBe("log");
+  });
+});
 
 describe("getLogLevel", () => {
   it("accepts every level the logger understands", () => {

@@ -62,3 +62,117 @@ describe("applyCompatibility", () => {
     expect(result.hits[0]).toMatchObject({ applied: true });
   });
 });
+
+const MASK_RULE = RULES.find((rule) => rule.action.kind === "mask-literal")!;
+const MASK_LITERAL = MASK_RULE.when.literal;
+const MASK_REPLACEMENT =
+  MASK_RULE.action.kind === "mask-literal" ? MASK_RULE.action.replacement : "";
+
+describe("applyCompatibility — content scope", () => {
+  it("masks the literal in a user text part and leaves everything else byte-identical", () => {
+    const input = {
+      systemInstruction: "sys",
+      contents: [
+        {
+          role: "user" as const,
+          parts: [{ text: `before ${MASK_LITERAL} after` }, { text: "untouched" }],
+        },
+      ],
+    };
+
+    const result = applyCompatibility(input, "on");
+
+    expect(result.hits).toEqual([
+      { ruleId: MASK_RULE.id, chars: MASK_LITERAL.length, applied: true },
+    ]);
+    const [first, second] = result.input.contents[0]!.parts;
+    expect("text" in first! && first.text).toBe(`before ${MASK_REPLACEMENT} after`);
+    expect("text" in second! && second.text).toBe("untouched");
+    expect(result.input.systemInstruction).toBe("sys");
+  });
+
+  it("masks inside a tool result, where the agent's own reads land", () => {
+    const input = {
+      systemInstruction: "",
+      contents: [
+        {
+          role: "user" as const,
+          parts: [
+            {
+              functionResponse: {
+                name: "bash",
+                response: { output: `$ cat note.md\n${MASK_LITERAL}\n` },
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    const result = applyCompatibility(input, "on");
+
+    expect(result.hits[0]).toMatchObject({ ruleId: MASK_RULE.id, applied: true });
+    const response = result.input.contents[0]!.parts[0] as {
+      functionResponse: { response: { output: string } };
+    };
+    expect(response.functionResponse.response.output).toBe(
+      `$ cat note.md\n${MASK_REPLACEMENT}\n`,
+    );
+  });
+
+  it("does not touch functionCall arguments or thought parts", () => {
+    const input = {
+      systemInstruction: "",
+      contents: [
+        {
+          role: "model" as const,
+          parts: [
+            { functionCall: { name: "write", args: { text: MASK_LITERAL } } },
+            { thought: true as const, text: MASK_LITERAL },
+          ],
+        },
+      ],
+    };
+
+    expect(applyCompatibility(input, "on")).toEqual({ input, hits: [] });
+  });
+
+  it("is idempotent: a masked request has nothing left to match", () => {
+    const once = applyCompatibility(
+      { systemInstruction: "", contents: [{ role: "user", parts: [{ text: MASK_LITERAL }] }] },
+      "on",
+    );
+    const twice = applyCompatibility(once.input, "on");
+    expect(twice.input).toBe(once.input);
+    expect(twice.hits).toEqual([]);
+  });
+
+  it("reports the content hit without changing anything in log mode", () => {
+    const input = { systemInstruction: "", contents: [{ role: "user" as const, parts: [{ text: MASK_LITERAL }] }] };
+    const result = applyCompatibility(input, "log");
+    expect(result.input).toBe(input);
+    expect(result.hits).toEqual([
+      { ruleId: MASK_RULE.id, chars: MASK_LITERAL.length, applied: false, skipped: "log-only" },
+    ]);
+  });
+
+  it("never evaluates content in off mode", () => {
+    const input = { systemInstruction: "", contents: [{ role: "user" as const, parts: [{ text: MASK_LITERAL }] }] };
+    expect(applyCompatibility(input, "off")).toEqual({ input, hits: [] });
+  });
+
+  it("masks case-insensitively and counts every occurrence", () => {
+    const text = `${MASK_LITERAL.toUpperCase()} and ${MASK_LITERAL}`;
+    const result = applyCompatibility(
+      { systemInstruction: "", contents: [{ role: "user", parts: [{ text }] }] },
+      "on",
+    );
+    expect(result.hits[0]).toEqual({
+      ruleId: MASK_RULE.id,
+      chars: MASK_LITERAL.length * 2,
+      applied: true,
+    });
+    const part = result.input.contents[0]!.parts[0]!;
+    expect("text" in part && part.text).toBe(`${MASK_REPLACEMENT} and ${MASK_REPLACEMENT}`);
+  });
+});
