@@ -175,4 +175,44 @@ describe("applyCompatibility — content scope", () => {
     const part = result.input.contents[0]!.parts[0]!;
     expect("text" in part && part.text).toBe(`${MASK_REPLACEMENT} and ${MASK_REPLACEMENT}`);
   });
+
+  it("applies both system relocation and content masking when both match in the same request", () => {
+    const input = {
+      systemInstruction: `catalog: ${LITERAL}`,
+      contents: [{ role: "user" as const, parts: [{ text: `read: ${MASK_LITERAL}` }] }],
+    };
+
+    const result = applyCompatibility(input, "on");
+
+    expect(result.hits).toEqual([
+      { ruleId: RULES[0]!.id, chars: input.systemInstruction.length, applied: true },
+      { ruleId: MASK_RULE.id, chars: MASK_LITERAL.length, applied: true },
+    ]);
+    expect(result.input.systemInstruction).toBe("");
+    const part = result.input.contents[0]!.parts[0]!;
+    const text = "text" in part ? part.text : "";
+    expect(text).toContain("<system-instructions>");
+    expect(text).toContain(LITERAL);
+    expect(text).toContain(MASK_REPLACEMENT);
+    expect(text).not.toContain(MASK_LITERAL);
+
+    const second = applyCompatibility(result.input, "on");
+    expect(second.input).toBe(result.input);
+    expect(second.hits).toEqual([]);
+  });
+
+  it("reports all matching rules in log mode without changing the request", () => {
+    const input = {
+      systemInstruction: `catalog: ${LITERAL}`,
+      contents: [{ role: "user" as const, parts: [{ text: MASK_LITERAL }] }],
+    };
+
+    const result = applyCompatibility(input, "log");
+
+    expect(result.input).toBe(input);
+    expect(result.hits).toEqual([
+      { ruleId: RULES[0]!.id, chars: input.systemInstruction.length, applied: false, skipped: "log-only" },
+      { ruleId: MASK_RULE.id, chars: MASK_LITERAL.length, applied: false, skipped: "log-only" },
+    ]);
+  });
 });

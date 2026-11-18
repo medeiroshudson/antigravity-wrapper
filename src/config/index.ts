@@ -106,13 +106,13 @@ function nonNegativeInt(raw: string | undefined, fallback: number): number {
 }
 
 /**
- * Como aplicar as regras de compatibilidade com o upstream: `off` não avalia nada, `log`
- * reporta o que faria sem mudar o request, `on` aplica.
+ * How upstream compatibility rules are applied: `off` evaluates nothing, `log` reports
+ * matches without changing the request, `on` applies them.
  *
- * O padrão é `on`: as regras são a correção de um defeito medido, e o pior caso de uma regra
- * derrotada ou errada é o request voltar a falhar do mesmo jeito visível que falharia sem
- * regra nenhuma — não há corrupção silenciosa a proteger com uma etapa de medição. `log`
- * continua existindo como ferramenta forense pontual (bisecção de uma regra suspeita).
+ * Defaults to `on`: rules fix measured upstream defects, and the worst case of a defeated
+ * or wrong rule is the same visible refusal the request would get without any rule — there
+ * is no silent corruption to guard with a measurement phase. `log` remains available as a
+ * forensic tool to bisect a suspect rule.
  */
 export function getCompatibilityMode(env: NodeJS.ProcessEnv = process.env): "off" | "log" | "on" {
   const raw = env.COMPATIBILITY?.trim().toLowerCase();
