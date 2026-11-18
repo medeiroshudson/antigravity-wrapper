@@ -19,6 +19,7 @@ import { toContents, type ChatMessage } from "../lib/chat/compose.js";
 import {
   buildFunctionDeclarations,
   extractToolDefs,
+  hasWebSearchTool,
   toolInstruction,
 } from "../lib/chat/tools.js";
 import {
@@ -352,6 +353,7 @@ export async function chatRoutes(
     const enableWebSearch = Boolean(
       body.web_search === true ||
       body.web_search_options !== undefined ||
+      hasWebSearchTool(body) ||
       deps.env?.ANTIGRAVITY_SEARCH_AUTO === "true" ||
       process.env.ANTIGRAVITY_SEARCH_AUTO === "true",
     );

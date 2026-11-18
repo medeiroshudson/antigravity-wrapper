@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildFunctionDeclarations,
   extractToolDefs,
+  hasWebSearchTool,
   normalizeToolCalls,
   toolChoiceMode,
   toolInstruction,
@@ -32,6 +33,27 @@ describe("extractToolDefs", () => {
     expect(extractToolDefs({ tools: [{ function: {} }] })).toEqual([]);
     expect(extractToolDefs({})).toEqual([]);
   });
+
+  it("excludes web_search and web_search_preview pseudo-tools even if they carry a name", () => {
+    expect(
+      extractToolDefs({
+        tools: [
+          { type: "web_search_preview" },
+          { type: "web_search", name: "web_search" },
+          { type: "function", function: { name: "get_weather" } },
+        ],
+      }).map((t) => t.name),
+    ).toEqual(["get_weather"]);
+  });
+});
+
+describe("hasWebSearchTool", () => {
+  it("detects web_search and web_search_preview entries in tools", () => {
+    expect(hasWebSearchTool({ tools: [{ type: "web_search_preview" }] })).toBe(true);
+    expect(hasWebSearchTool({ tools: [{ type: "web_search" }] })).toBe(true);
+    expect(hasWebSearchTool(BODY)).toBe(false);
+    expect(hasWebSearchTool({})).toBe(false);
+  });
 });
 
 describe("toolChoiceMode", () => {
@@ -40,6 +62,13 @@ describe("toolChoiceMode", () => {
     expect(toolChoiceMode("required")).toBe("required");
     expect(toolChoiceMode({ type: "function", function: { name: "x" } })).toEqual({ name: "x" });
     expect(toolChoiceMode(undefined)).toBe("auto");
+  });
+
+  it("ignores tool_choice pointing at web_search or web_search_preview", () => {
+    expect(toolChoiceMode({ type: "web_search_preview" })).toBe("auto");
+    expect(toolChoiceMode({ type: "web_search" })).toBe("auto");
+    expect(toolChoiceMode({ type: "function", function: { name: "web_search_preview" } })).toBe("auto");
+    expect(toolChoiceMode({ type: "function", function: { name: "web_search" } })).toBe("auto");
   });
 });
 
