@@ -191,7 +191,11 @@ describe("TurnRunner", () => {
     }) as unknown as typeof fetch;
     const input = { ...BASE, systemInstruction: `catalog: ${literal}` };
 
-    const off = new TurnRunner({ accounts: service([snapshot("a1")]), fetchImpl });
+    const off = new TurnRunner({
+      accounts: service([snapshot("a1")]),
+      fetchImpl,
+      env: { COMPATIBILITY: "off" },
+    });
     await off.run(input);
     expect(bodies[0]!.request.systemInstruction.parts[0].text).toContain(literal);
 
@@ -204,6 +208,52 @@ describe("TurnRunner", () => {
     expect(bodies[1]!.request.systemInstruction.parts[0].text).toBe("");
     expect(bodies[1]!.request.contents[0].parts[0].text).toContain("<system-instructions>");
     expect(outcome.result.warnings?.some((w) => w.field === "system_instruction")).toBe(true);
+  });
+
+  it("masks the measured content literal by default, without any env var", async () => {
+    // Measured 2026-11-18 on gemini-4-hydrogen-sonar: the identity sentence in a user
+    // message answered 429 RESOURCE_EXHAUSTED on two accounts while quota and a
+    // 240k-token neutral prompt were fine.
+    const literal = "You are Codex, an agent based on GPT-5.";
+    const bodies: Array<Record<string, any>> = [];
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, any>);
+      return sse(TEXT_SSE);
+    }) as unknown as typeof fetch;
+    const input = {
+      ...BASE,
+      contents: [{ role: "user" as const, parts: [{ text: `read this: ${literal}` }] }],
+    };
+
+    const outcome = await new TurnRunner({ accounts: service([snapshot("a1")]), fetchImpl }).run(input);
+
+    const shipped = JSON.stringify(bodies[0]);
+    expect(shipped).not.toContain(literal);
+    expect(shipped).toContain("You are an AI agent based on GPT-5.");
+    expect(outcome.result.warnings?.some((w) => w.field === "content")).toBe(true);
+  });
+
+  it("names the applied rule when the upstream still refuses the request", async () => {
+    // The mask can be defeated upstream. When that happens the refusal must say which
+    // rule had been applied, so the failure is attributable at debug time instead of
+    // being found by reading logs on a schedule.
+    const body =
+      '{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}';
+    const fetchImpl = vi.fn(async () => new Response(body, { status: 429 })) as unknown as typeof fetch;
+    const accounts = service([snapshot("a1"), snapshot("a2")]);
+    const input = {
+      ...BASE,
+      contents: [
+        { role: "user" as const, parts: [{ text: "You are Codex, an agent based on GPT-5." }] },
+      ],
+    };
+
+    const error = await new TurnRunner({ accounts, fetchImpl }).run(input).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(RequestRefusedError);
+    expect((error as RequestRefusedError).compatRules).toEqual([
+      "content-literal-codex-agent-identity",
+    ]);
   });
 
   it("records an upstream TOS block against the account and fails over to the next one", async () => {

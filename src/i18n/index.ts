@@ -80,6 +80,9 @@ const enUS = {
   "warn.systemInstructionRelocated":
     "The system instruction was moved, verbatim, to the first user turn: the upstream refuses this text in the system role (measured upstream defect), and the same text in the user role is accepted.",
 
+  "warn.contentMasked":
+    "A measured upstream-refused phrase was rewritten in place: the upstream answers a false 429 RESOURCE_EXHAUSTED for this literal (measured defect), and the rewritten text is accepted.",
+
   // --- search grounding ----------------------------------------------------
   "search.sources": "Fontes consultadas",
 

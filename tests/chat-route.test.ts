@@ -208,7 +208,12 @@ describe("POST /v1/chat/completions", () => {
       ],
     };
 
-    app = buildServer("test-key", { store, env: ENV, fetchImpl: backend, logger: false });
+    app = buildServer("test-key", {
+      store,
+      env: { ...ENV, COMPATIBILITY: "off" },
+      fetchImpl: backend,
+      logger: false,
+    });
     const off = await app.inject({ method: "POST", url: "/v1/chat/completions", headers: auth, payload });
     expect(off.statusCode).toBe(400);
     expect(off.json().error.code).toBe("upstream_refused_request");

@@ -15,7 +15,7 @@ import {
   type GeminiContent,
 } from "../antigravity/envelope.js";
 import { ConversationRegistry } from "./identity.js";
-import { applyCompatibility } from "./compatibility.js";
+import { applyCompatibility, RULES } from "./compatibility.js";
 import { isDefinitive, ClientDisconnectedError, UpstreamError } from "../antigravity/errors.js";
 import { failureScope, refusalKey } from "../antigravity/scope.js";
 import { readSse, streamGenerate } from "../antigravity/rpc.js";
@@ -147,6 +147,8 @@ export class RequestRefusedError extends Error {
     readonly accounts: readonly string[],
     readonly upstream: UpstreamError,
     readonly fingerprint: string,
+    /** Regras de compatibilidade que já tinham sido aplicadas neste request. */
+    readonly compatRules: readonly string[] = [],
   ) {
     super(t("chat.requestRefused", { accounts: accounts.length, detail: upstream.message }));
     Object.setPrototypeOf(this, RequestRefusedError.prototype);
@@ -210,10 +212,11 @@ export class TurnRunner {
     // vai para o upstream, e o fingerprint descreve exatamente isso.
     const compatibility = applyCompatibility(input, getCompatibilityMode(this.deps.env));
     const wire = compatibility.input;
+    const appliedRules = compatibility.hits.filter((hit) => hit.applied).map((hit) => hit.ruleId);
     if (compatibility.hits.length > 0) {
       this.logger.warn(
         { runtimeModel: input.runtimeModel, hits: compatibility.hits, mode: getCompatibilityMode(this.deps.env) },
-        compatibility.hits.some((hit) => hit.applied) ? "system instruction relocated" : "system instruction relocation candidate",
+        appliedRules.length > 0 ? "compatibility rule applied" : "compatibility rule matched",
       );
     }
     const ordered = await this.deps.accounts.orderFor(wire.runtimeModel);
@@ -269,7 +272,14 @@ export class TurnRunner {
         if (compatibility.hits.some((hit) => hit.applied)) {
           result.warnings = [
             ...(result.warnings ?? []),
-            { field: "system_instruction", reason: t("warn.systemInstructionRelocated") },
+            ...compatibility.hits
+              .filter((hit) => hit.applied)
+              .map((hit) => {
+                const rule = RULES.find((candidate) => candidate.id === hit.ruleId);
+                return rule?.action.kind === "mask-literal"
+                  ? { field: "content", reason: t("warn.contentMasked") }
+                  : { field: "system_instruction", reason: t("warn.systemInstructionRelocated") };
+              }),
           ];
         }
         this.identities.recordSuccess(key, candidate.id);
@@ -318,6 +328,7 @@ export class TurnRunner {
                   accounts: [previous, candidate.id],
                   kind: error.kind,
                   status: error.status,
+                  ...(appliedRules.length > 0 ? { compatRules: appliedRules } : {}),
                 },
                 "request refused by upstream",
               );
@@ -326,6 +337,7 @@ export class TurnRunner {
                 [previous, candidate.id],
                 error,
                 fingerprint,
+                appliedRules,
               );
             }
             verdicts.set(verdict, candidate.id);
