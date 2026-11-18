@@ -1,42 +1,42 @@
 import type { GeminiContent, GeminiPart } from "../antigravity/envelope.js";
 
 /**
- * Regras de compatibilidade com o upstream.
+ * Upstream compatibility rules.
  *
- * Cada regra existe porque o backend recusou uma representação que é válida no contrato do
- * cliente, e porque existe medida que mostra a recusa e a alternativa aceita. Ampliar uma
- * regra sem medida nova é como trocar o sintoma de lugar.
+ * Each rule exists because the backend refused a representation that is valid under the
+ * client contract, and because a measurement shows both the refusal and the accepted
+ * alternative. Broadening a rule without a fresh measurement only moves the symptom.
  *
- * Medido em 2026-11-15, dirigindo o serviço com o opencode:
- * - `tools.opencode.session_move` dentro da `systemInstruction` → 429 RESOURCE_EXHAUSTED em
- *   todas as contas; o mesmo texto no papel de usuário → 200; texto neutro de 80k chars → 200.
+ * Measured 2026-11-15, driving the service with opencode:
+ * - `tools.opencode.session_move` inside `systemInstruction` -> 429 RESOURCE_EXHAUSTED on
+ *   every account; the same text in the user role -> 200; 80k chars of neutral text -> 200.
  *
- * Medido em 2026-11-18, no `gemini-4-hydrogen-sonar`:
- * - a frase de identidade do Codex numa mensagem de usuário → 429 em duas contas, com quota
- *   em 88%/92%, prompt neutro de 240k tokens em 200 e o mesmo request sem a frase em 200.
- *   O scanner do upstream olha o conteúdo, não só a `systemInstruction`, então realocar o
- *   papel não repara esse caso: a frase precisa ser reescrita onde está.
+ * Measured 2026-11-18 on `gemini-4-hydrogen-sonar`:
+ * - the Codex identity sentence in a user message -> 429 on two accounts, with quota at
+ *   88%/92%, a 240k-token neutral prompt at 200, and the same request without the sentence
+ *   at 200. The upstream scanner inspects content, not only `systemInstruction`, so
+ *   relocating the role cannot repair this case: the phrase must be rewritten in place.
  *
- * Frases relatadas por outros gateways (CLIProxyAPI, oh-my-pi) ainda não medidas aqui —
- * `<system-conventions>`, a lista RFC 2119 completa, "Hermes Agent"/"Nous Research" — ficam
- * fora até existir uma substituição segura para cada uma: gatilho em forma de tag não pode
- * ser renomeado sem quebrar a prosa que referencia o nome da tag.
+ * Phrases reported by other gateways (CLIProxyAPI, oh-my-pi) not yet measured here —
+ * `<system-conventions>`, the full RFC 2119 list, "Hermes Agent"/"Nous Research" — stay
+ * out until a safe replacement exists for each: tag-shaped triggers cannot be renamed
+ * without breaking prose that references the tag name.
  */
 export type CompatibilityMode = "off" | "log" | "on";
 
-/** Onde a regra olha: a system instruction, ou todas as partes de texto do request. */
+/** Where a rule looks: the system instruction, or every text part of the request. */
 export type CompatibilityField = "systemInstruction" | "content";
 
 /**
- * O que a regra faz quando casa.
+ * What a rule does when it matches.
  *
- * `relocate-system-to-first-user` move a system instruction inteira para o primeiro turno de
- * usuário: medido 2026-11-15, o upstream recusa o literal no papel de sistema e aceita o
- * mesmo texto no papel de usuário.
+ * `relocate-system-to-first-user` moves the whole system instruction into the first user
+ * turn: measured 2026-11-15, the upstream refuses the literal in the system role and
+ * accepts the same text in the user role.
  *
- * `mask-literal` reescreve o literal onde ele estiver, com a substituição declarada na
- * regra. Zero-width não é oferecido de propósito: o upstream despe esses caracteres antes
- * de casar, então a técnica já nasce derrotada.
+ * `mask-literal` rewrites the matched literal in place with the rule's replacement.
+ * Zero-width insertion is deliberately not offered: the upstream strips those characters
+ * before matching, so the technique is already defeated.
  */
 export type CompatibilityAction =
   | { kind: "relocate-system-to-first-user"; marker: string }
@@ -46,7 +46,7 @@ export interface CompatibilityRule {
   id: string;
   when: { field: CompatibilityField; literal: string; caseInsensitive: boolean };
   action: CompatibilityAction;
-  /** Assinatura medida que justifica a regra, e quando foi medida. */
+  /** Measured signature justifying the rule, and when it was measured. */
   evidence: string;
   measuredAt: string;
 }
@@ -79,10 +79,10 @@ export const RULES: readonly CompatibilityRule[] = [
 
 export interface CompatibilityHit {
   ruleId: string;
-  /** Caracteres casados: o tamanho da system instruction, ou a soma dos literais. */
+  /** Matched characters: the system instruction length, or the sum of matched literals. */
   chars: number;
   applied: boolean;
-  /** Por que não foi aplicada, quando aplicável. */
+  /** Why the rule was not applied, when applicable. */
   skipped?: "no-user-turn" | "log-only";
 }
 
@@ -97,7 +97,7 @@ function matches(rule: CompatibilityRule, text: string): boolean {
     : text.includes(rule.when.literal);
 }
 
-/** Substitui todas as ocorrências do literal, devolvendo quantos caracteres casaram. */
+/** Replaces every occurrence of the literal, returning how many characters matched. */
 function maskText(rule: CompatibilityRule, text: string): { text: string; chars: number } {
   const replacement = rule.action.kind === "mask-literal" ? rule.action.replacement : null;
   if (replacement === null) return { text, chars: 0 };
@@ -123,10 +123,10 @@ function hasFunctionOutput(part: GeminiPart): part is {
 }
 
 /**
- * Reescreve o literal em toda parte de texto do request: turnos de usuário e modelo, e o
- * `output` dos resultados de ferramenta. Argumentos de `functionCall` e partes de `thought`
- * ficam intactos: mexer nos primeiros corromperia uma chamada, e as segundas carregam a
- * assinatura de continuidade do modelo.
+ * Rewrites the literal across every text part of the request: user and model turns, and
+ * tool result `output`. `functionCall` arguments and `thought` parts stay untouched:
+ * altering the former would corrupt a call, and the latter carry the model's continuity
+ * signature.
  */
 function maskContents(
   rule: CompatibilityRule,
@@ -173,7 +173,7 @@ function maskContents(
   return { contents: changed ? next : contents, chars };
 }
 
-/** Prefixa o texto no primeiro turno do usuário, sem duplicar quando já prefixado. */
+/** Prepends the system text to the first user turn, without duplicating when already moved. */
 function relocate(rule: CompatibilityRule, input: ChatInput): ChatInput | CompatibilityHit["skipped"] {
   const marker = rule.action.kind === "relocate-system-to-first-user" ? rule.action.marker : null;
   if (marker === null) return "no-user-turn";
@@ -201,11 +201,11 @@ function relocate(rule: CompatibilityRule, input: ChatInput): ChatInput | Compat
 }
 
 /**
- * Aplica as regras conforme o modo. `off` não avalia nada; `log` avalia e reporta sem mudar
- * o request; `on` aplica todas as regras que casarem, em sequência.
+ * Applies rules according to the mode. `off` evaluates nothing; `log` evaluates and
+ * reports without changing the request; `on` applies all matching rules in sequence.
  *
- * Idempotência: a realocação esvazia a `systemInstruction` e a máscara remove o literal, então
- * uma segunda passagem não encontra o que casar e não faz nada.
+ * Idempotence: relocation empties `systemInstruction` and masking removes the literal, so
+ * a second pass finds nothing left to match and does nothing.
  */
 export function applyCompatibility<T extends ChatInput>(
   input: T,

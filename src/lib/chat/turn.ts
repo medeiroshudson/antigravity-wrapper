@@ -147,7 +147,7 @@ export class RequestRefusedError extends Error {
     readonly accounts: readonly string[],
     readonly upstream: UpstreamError,
     readonly fingerprint: string,
-    /** Regras de compatibilidade que já tinham sido aplicadas neste request. */
+    /** Compatibility rules that had already been applied to this request. */
     readonly compatRules: readonly string[] = [],
   ) {
     super(t("chat.requestRefused", { accounts: accounts.length, detail: upstream.message }));
