@@ -794,7 +794,7 @@ describe("management", () => {
 
     const response = await app.inject({
       method: "GET",
-      url: "/admin/accounts/quota",
+      url: "/admin/accounts/quota?detailed=true",
       headers: auth,
     });
     const body = response.json() as {
@@ -822,7 +822,7 @@ describe("management", () => {
 
     const response = await app.inject({
       method: "GET",
-      url: "/admin/accounts/quota",
+      url: "/admin/accounts/quota?detailed=true",
       headers: auth,
     });
     const body = response.json() as {
@@ -913,7 +913,7 @@ describe("management", () => {
   it("exposes the tier as an object on every account view", async () => {
     store.setPaidTier("a1", { id: "g1-pro-tier", name: "Google AI Pro" });
 
-    for (const url of ["/admin/accounts", "/admin/accounts/quota", "/admin/accounts/a1"]) {
+    for (const url of ["/admin/accounts", "/admin/accounts/quota?detailed=true", "/admin/accounts/a1"]) {
       const response = await app.inject({
         method: "GET",
         url,
@@ -945,7 +945,7 @@ describe("management", () => {
 
     const response = await app.inject({
       method: "GET",
-      url: "/admin/accounts/quota",
+      url: "/admin/accounts/quota?detailed=true",
       headers: auth,
     });
     const account = (response.json() as { accounts: Array<Record<string, unknown>> }).accounts[0] ?? {};
@@ -1121,7 +1121,7 @@ describe("management", () => {
 
     const response = await app.inject({
       method: "GET",
-      url: "/admin/accounts/quota",
+      url: "/admin/accounts/quota?detailed=true",
       headers: auth,
     });
 
@@ -1223,5 +1223,61 @@ describe("management", () => {
     expect(allRes.statusCode).toBe(200);
     const allBody = allRes.json() as { accounts: Array<{ id: string }> };
     expect(allBody.accounts.map((a) => a.id)).toEqual(["a1", "a2", "a3"]);
+  });
+
+  it("returns compact pool and account quota on /admin/accounts/quota by default", async () => {
+    store.setPaidTier("a1", { id: "g1-pro-tier", name: "Google AI Pro" });
+    store.replaceQuota("a1", [
+      {
+        bucketId: "gemini-5h", window: "5h", displayName: null, groupName: "Gemini Models",
+        groupDescription: "Models", bucketDescription: "Desc", remainingFraction: 0.95,
+        resetAt: Date.now() + 3600_000, fetchedAt: Date.now(),
+      },
+      {
+        bucketId: "gemini-weekly", window: "weekly", displayName: null, groupName: "Gemini Models",
+        groupDescription: "Models", bucketDescription: "Desc", remainingFraction: 0.8,
+        resetAt: Date.now() + 86400_000, fetchedAt: Date.now(),
+      },
+      {
+        bucketId: "3p-5h", window: "5h", displayName: null, groupName: "Claude and GPT models",
+        groupDescription: "Models", bucketDescription: "Desc", remainingFraction: 0.6,
+        resetAt: Date.now() + 1800_000, fetchedAt: Date.now(),
+      },
+    ]);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/admin/accounts/quota",
+      headers: auth,
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as Record<string, any>;
+    expect(body.activeAccounts).toBe(1);
+    expect(body.gemini).toEqual({
+      availableAccounts: 1,
+      "5h": { remainingPercent: 95, resetsIn: expect.any(String) },
+      weekly: { remainingPercent: 80, resetsIn: expect.any(String) },
+    });
+    expect(body.claudeGpt).toEqual({
+      availableAccounts: 1,
+      "5h": { remainingPercent: 60, resetsIn: expect.any(String) },
+      weekly: { remainingPercent: null, resetsIn: null },
+    });
+    expect(body.accounts).toEqual([
+      {
+        id: "a1",
+        email: "hudson@gmail.com",
+        state: "active",
+        tier: "Google AI Pro",
+        gemini: {
+          "5h": { remainingPercent: 95, resetsIn: expect.any(String) },
+          weekly: { remainingPercent: 80, resetsIn: expect.any(String) },
+        },
+        claudeGpt: {
+          "5h": { remainingPercent: 60, resetsIn: expect.any(String) },
+        },
+      },
+    ]);
   });
 });

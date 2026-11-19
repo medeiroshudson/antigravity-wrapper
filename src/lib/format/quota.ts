@@ -46,6 +46,29 @@ export interface LeanPoolQuota {
   claudeGpt: FamilyQuotaSummary;
 }
 
+export interface CompactWindowQuota {
+  remainingPercent: number | null;
+  resetsIn: string | null;
+}
+
+export interface CompactFamilyQuota {
+  availableAccounts: number;
+  "5h": CompactWindowQuota;
+  weekly: CompactWindowQuota;
+}
+
+export interface CompactPoolQuota {
+  generatedAt: string;
+  activeAccounts: number;
+  gemini: CompactFamilyQuota;
+  claudeGpt: CompactFamilyQuota;
+}
+
+export interface CompactAccountFamilyQuota {
+  "5h"?: CompactWindowQuota;
+  weekly?: CompactWindowQuota;
+}
+
 /**
  * Assembles a lean summary of Gemini and Claude/GPT quota across the pool.
  *
@@ -154,6 +177,67 @@ export function toLeanPoolQuota(
     activeAccounts: active.length,
     gemini: summarizeFamily("gemini-"),
     claudeGpt: summarizeFamily("3p-"),
+  };
+}
+
+export function toCompactPoolQuota(
+  accounts: readonly AccountSnapshot[],
+  now: number = Date.now(),
+): CompactPoolQuota {
+  const lean = toLeanPoolQuota(accounts, now);
+  const compactFamily = (family: FamilyQuotaSummary): CompactFamilyQuota => ({
+    availableAccounts: family.availableAccounts,
+    "5h": {
+      remainingPercent: family["5h"].remainingPercent,
+      resetsIn: family["5h"].resetsIn,
+    },
+    weekly: {
+      remainingPercent: family.weekly.remainingPercent,
+      resetsIn: family.weekly.resetsIn,
+    },
+  });
+
+  return {
+    generatedAt: lean.generatedAt,
+    activeAccounts: lean.activeAccounts,
+    gemini: compactFamily(lean.gemini),
+    claudeGpt: compactFamily(lean.claudeGpt),
+  };
+}
+
+export function toCompactAccountFamilyQuota(
+  rows: readonly QuotaBucket[],
+  prefix: string,
+  now: number = Date.now(),
+): CompactAccountFamilyQuota | undefined {
+  const familyRows = rows.filter((row) => row.bucketId.startsWith(prefix));
+  if (familyRows.length === 0) return undefined;
+
+  const summarize = (windowName: string): CompactWindowQuota | undefined => {
+    const matching = familyRows.filter((row) => row.window.toLowerCase() === windowName);
+    if (matching.length === 0) return undefined;
+    const mean =
+      matching.reduce((total, row) => total + row.remainingFraction, 0) / matching.length;
+    const nextReset = matching.reduce<number | null>(
+      (earliest, row) =>
+        row.resetAt !== null && row.resetAt > now && (earliest === null || row.resetAt < earliest)
+          ? row.resetAt
+          : earliest,
+      null,
+    );
+    return {
+      remainingPercent: Math.max(0, Math.min(100, Math.round(mean * 100))),
+      resetsIn: toResetPhrase(nextReset, now),
+    };
+  };
+
+  const fiveHour = summarize("5h");
+  const weekly = summarize("weekly");
+  if (!fiveHour && !weekly) return undefined;
+
+  return {
+    ...(fiveHour ? { "5h": fiveHour } : {}),
+    ...(weekly ? { weekly } : {}),
   };
 }
 

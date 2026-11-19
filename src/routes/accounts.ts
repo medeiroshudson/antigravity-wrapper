@@ -14,7 +14,12 @@ import {
   type OnboardingOutcome,
 } from "../lib/antigravity/oauth.js";
 import { toIsoUtc, toResetPhrase } from "../lib/format/datetime.js";
-import { toGroupsView, toLeanPoolQuota } from "../lib/format/quota.js";
+import {
+  toCompactAccountFamilyQuota,
+  toCompactPoolQuota,
+  toGroupsView,
+  toLeanPoolQuota,
+} from "../lib/format/quota.js";
 import { toOpenAIErrorBody } from "../lib/openai-format/index.js";
 import { getAccountService, getStore } from "../lib/runtime.js";
 import { accountState, isUsable, type Account, type AccountStore, type CooldownRow } from "../lib/accounts/store.js";
@@ -332,19 +337,50 @@ export async function accountsRoutes(app: FastifyInstance, deps: RouteDeps = {})
     async (request, reply) => {
       const now = Date.now();
       const snapshots = store.snapshot();
-      const lean = toLeanPoolQuota(snapshots, now);
       const includeDisabled = request.query?.includeDisabled === "true";
       const visibleAccounts = includeDisabled
         ? snapshots
         : snapshots.filter((account) => account.enabled && account.status !== "invalid");
 
+      if (request.query?.detailed === "true") {
+        const lean = toLeanPoolQuota(snapshots, now);
+        reply.status(200).send({
+          ...lean,
+          accounts: visibleAccounts.map((account) => ({
+            ...publicView(account, now, account.cooldowns),
+            groups: toGroupsView(account.quota, now),
+            quotaSummaryError: account.quotaSummaryError,
+          })),
+        });
+        return;
+      }
+
+      const compact = toCompactPoolQuota(snapshots, now);
       reply.status(200).send({
-        ...lean,
-        accounts: visibleAccounts.map((account) => ({
-          ...publicView(account, now, account.cooldowns),
-          groups: toGroupsView(account.quota, now),
-          quotaSummaryError: account.quotaSummaryError,
-        })),
+        ...compact,
+        accounts: visibleAccounts.map((account) => {
+          const gemini = toCompactAccountFamilyQuota(account.quota, "gemini-", now);
+          const claudeGpt = toCompactAccountFamilyQuota(account.quota, "3p-", now);
+          return {
+            id: account.id,
+            email: account.email ?? null,
+            state: accountState(account, now),
+            ...(account.paidTierName ? { tier: account.paidTierName } : {}),
+            ...(account.priority !== 0 ? { priority: account.priority } : {}),
+            ...(account.cooldowns.length > 0
+              ? {
+                  cooldowns: account.cooldowns.map((row) => ({
+                    scope: row.scope,
+                    kind: row.kind,
+                    resetsIn: toResetPhrase(row.until, now),
+                  })),
+                }
+              : {}),
+            ...(account.quotaSummaryError ? { quotaSummaryError: account.quotaSummaryError } : {}),
+            ...(gemini ? { gemini } : {}),
+            ...(claudeGpt ? { claudeGpt } : {}),
+          };
+        }),
       });
     },
   );
