@@ -327,20 +327,27 @@ export async function accountsRoutes(app: FastifyInstance, deps: RouteDeps = {})
     reply.status(200).send(lean);
   });
 
-  app.get<{ Querystring: { detailed?: string } }>("/admin/accounts/quota", async (_request, reply) => {
-    const now = Date.now();
-    const snapshots = store.snapshot();
-    const lean = toLeanPoolQuota(snapshots, now);
+  app.get<{ Querystring: { detailed?: string; includeDisabled?: string } }>(
+    "/admin/accounts/quota",
+    async (request, reply) => {
+      const now = Date.now();
+      const snapshots = store.snapshot();
+      const lean = toLeanPoolQuota(snapshots, now);
+      const includeDisabled = request.query?.includeDisabled === "true";
+      const visibleAccounts = includeDisabled
+        ? snapshots
+        : snapshots.filter((account) => account.enabled && account.status !== "invalid");
 
-    reply.status(200).send({
-      ...lean,
-      accounts: snapshots.map((account) => ({
-        ...publicView(account, now, account.cooldowns),
-        groups: toGroupsView(account.quota, now),
-        quotaSummaryError: account.quotaSummaryError,
-      })),
-    });
-  });
+      reply.status(200).send({
+        ...lean,
+        accounts: visibleAccounts.map((account) => ({
+          ...publicView(account, now, account.cooldowns),
+          groups: toGroupsView(account.quota, now),
+          quotaSummaryError: account.quotaSummaryError,
+        })),
+      });
+    },
+  );
 
   app.get<{ Params: { id: string } }>("/admin/accounts/:id", async (request, reply) => {
     const account = store.getAccount(request.params.id);

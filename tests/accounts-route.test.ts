@@ -1177,4 +1177,51 @@ describe("management", () => {
     });
     expect(response.statusCode).toBe(401);
   });
+
+  it("omits disabled and invalid accounts from /admin/accounts/quota by default", async () => {
+    store.upsertAccount({
+      id: "a2",
+      email: "disabled@gmail.com",
+      refreshToken: "rt-2",
+      accessToken: "at-2",
+      accessExpiresAt: Date.now() + 3_600_000,
+      projectId: "proj-2",
+    });
+    store.setEnabled("a2", false);
+    store.replaceQuota("a2", [
+      {
+        bucketId: "gemini-5h", window: "5h", displayName: null, groupName: "Gemini Models",
+        groupDescription: null, bucketDescription: null, remainingFraction: 0.5,
+        resetAt: Date.now() + 3600_000, fetchedAt: Date.now(),
+      },
+    ]);
+
+    store.upsertAccount({
+      id: "a3",
+      email: "invalid@gmail.com",
+      refreshToken: "rt-3",
+      accessToken: "at-3",
+      accessExpiresAt: Date.now() + 3_600_000,
+      projectId: "proj-3",
+    });
+    store.setStatus("a3", "invalid", { statusKind: "tos_blocked", lastError: "blocked" });
+
+    const defaultRes = await app.inject({
+      method: "GET",
+      url: "/admin/accounts/quota",
+      headers: auth,
+    });
+    expect(defaultRes.statusCode).toBe(200);
+    const defaultBody = defaultRes.json() as { accounts: Array<{ id: string }> };
+    expect(defaultBody.accounts.map((a) => a.id)).toEqual(["a1"]);
+
+    const allRes = await app.inject({
+      method: "GET",
+      url: "/admin/accounts/quota?includeDisabled=true",
+      headers: auth,
+    });
+    expect(allRes.statusCode).toBe(200);
+    const allBody = allRes.json() as { accounts: Array<{ id: string }> };
+    expect(allBody.accounts.map((a) => a.id)).toEqual(["a1", "a2", "a3"]);
+  });
 });
