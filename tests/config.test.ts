@@ -4,6 +4,7 @@ import {
   endpointCandidates,
   getBodyLimitBytes,
   getCompatibilityMode,
+  getLoadBalanceStrategy,
   getLogLevel,
   getMaxFailoverAttempts,
   getStreamFlushPatienceMs,
@@ -23,6 +24,25 @@ describe("getCompatibilityMode", () => {
     expect(getCompatibilityMode({ COMPATIBILITY: "off" })).toBe("off");
     expect(getCompatibilityMode({ COMPATIBILITY: " OFF " })).toBe("off");
     expect(getCompatibilityMode({ COMPATIBILITY: "log" })).toBe("log");
+  });
+});
+
+describe("getLoadBalanceStrategy", () => {
+  it("defaults to pace-deficit on an empty or unknown value", () => {
+    expect(getLoadBalanceStrategy({})).toBe("pace-deficit");
+    expect(getLoadBalanceStrategy({ LOAD_BALANCE_STRATEGY: "nonsense" })).toBe("pace-deficit");
+  });
+
+  it("accepts every known name, case-insensitively", () => {
+    for (const name of [
+      "pace-deficit",
+      "quota-first",
+      "least-busy",
+      "round-robin",
+      "weighted-random",
+    ]) {
+      expect(getLoadBalanceStrategy({ LOAD_BALANCE_STRATEGY: `  ${name.toUpperCase()}  ` })).toBe(name);
+    }
   });
 });
 

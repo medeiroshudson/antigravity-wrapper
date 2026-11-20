@@ -255,6 +255,7 @@ export class TurnRunner {
       // A client that already left cannot be served: the account switch would spend a
       // full upstream turn on a dead request.
       if (opts.signal?.aborted) throw new ClientDisconnectedError();
+      const releaseInFlight = this.deps.accounts.acquireInFlight?.(candidate.id);
       try {
         this.logger.debug({ accountId: candidate.id }, "account attempt");
         const fresh = await this.deps.accounts.ensureFresh(candidate);
@@ -387,6 +388,8 @@ export class TurnRunner {
             retryAfterMs: error.retryAfterMs,
             appealUrl: error.appealUrl,
           });
+        } finally {
+          releaseInFlight?.();
         }
       }
 

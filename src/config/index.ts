@@ -1,4 +1,5 @@
 import { t } from "../i18n/index.js";
+import type { StrategyName } from "../lib/accounts/strategies/types.js";
 
 export const ENDPOINTS = [
   "https://daily-cloudcode-pa.googleapis.com",
@@ -180,6 +181,27 @@ export function getStreamFlushPatienceMs(env: NodeJS.ProcessEnv = process.env): 
 }
 export function getMaxFailoverAttempts(env: NodeJS.ProcessEnv = process.env): number {
   return positiveInt(env.MAX_FAILOVER_ATTEMPTS, 3);
+}
+
+/** The load-balancing strategies the selector can be asked for. */
+export const STRATEGY_NAMES = [
+  "pace-deficit",
+  "quota-first",
+  "least-busy",
+  "round-robin",
+  "weighted-random",
+] as const;
+
+/**
+ * How accounts are ranked when a family has more than one eligible candidate. An unknown
+ * name falls back to `pace-deficit`, the way an unknown log level falls back to `info`:
+ * a typo in an environment variable must not stop the service from booting.
+ */
+export function getLoadBalanceStrategy(env: NodeJS.ProcessEnv = process.env): StrategyName {
+  const value = env.LOAD_BALANCE_STRATEGY?.trim().toLowerCase();
+  return (STRATEGY_NAMES as readonly string[]).includes(value ?? "")
+    ? (value as StrategyName)
+    : "pace-deficit";
 }
 
 /** The levels the logger understands. `silent` is one of them, so logging can be muted. */

@@ -1,5 +1,10 @@
-import { PACING_TOLERANCE, paceScore } from "./pacing.js";
+import { paceScore } from "./pacing.js";
 import type { AccountSnapshot, CooldownRow } from "./store.js";
+import { createStrategy } from "./strategies/registry.js";
+import type { EligibleCandidate, LoadBalanceStrategy } from "./strategies/types.js";
+
+/** Ranking used when no strategy is passed: what the pool did before strategies existed. */
+const DEFAULT_STRATEGY = createStrategy("pace-deficit");
 
 /**
  * The bucket-id prefix of the group a runtime model belongs to (spec §8): the backend
@@ -110,60 +115,6 @@ export function isEligibleForFamily(
   return eligibleIgnoringCooldown(account, bucketIdPrefix, now);
 }
 
-interface Candidate {
-  account: AccountSnapshot;
-  quota: number | null;
-  score: number | null;
-}
-
-function byLastUseThenId(left: Candidate, right: Candidate): number {
-  const byUse = (left.account.lastUsedAt ?? 0) - (right.account.lastUsedAt ?? 0);
-  if (byUse !== 0) return byUse;
-  if (left.account.id === right.account.id) return 0;
-  return left.account.id < right.account.id ? -1 : 1;
-}
-
-/**
- * Emits the scored positive tier: the top `PACING_TOLERANCE` band rotates by least
- * recent use, and the rest follow by pace score descending (spec D2's tolerance band).
- */
-function orderByPace(candidates: readonly Candidate[]): Candidate[] {
-  if (candidates.length === 0) return [];
-  const best = Math.max(...candidates.map((candidate) => candidate.score ?? Number.NEGATIVE_INFINITY));
-  const bandLimit = best - PACING_TOLERANCE;
-  const band: Candidate[] = [];
-  const outside: Candidate[] = [];
-  for (const candidate of candidates) {
-    if ((candidate.score ?? Number.NEGATIVE_INFINITY) >= bandLimit) band.push(candidate);
-    else outside.push(candidate);
-  }
-  band.sort(byLastUseThenId);
-  outside.sort((left, right) => {
-    const byScore = (right.score ?? 0) - (left.score ?? 0);
-    return byScore !== 0 ? byScore : byLastUseThenId(left, right);
-  });
-  return [...band, ...outside];
-}
-
-/** Emits one priority level in the spec D2 tier order, deterministically. */
-function orderWithinPriority(candidates: readonly Candidate[]): Candidate[] {
-  const scoredPositive = candidates.filter(
-    (candidate) => candidate.quota !== null && candidate.quota > 0 && candidate.score !== null,
-  );
-  const unscoredPositive = candidates.filter(
-    (candidate) => candidate.quota !== null && candidate.quota > 0 && candidate.score === null,
-  );
-  const unknown = candidates.filter((candidate) => candidate.quota === null);
-  const expiredZero = candidates.filter((candidate) => candidate.quota !== null && candidate.quota <= 0);
-  unscoredPositive.sort((left, right) => {
-    const byQuota = (right.quota ?? 0) - (left.quota ?? 0);
-    return byQuota !== 0 ? byQuota : byLastUseThenId(left, right);
-  });
-  unknown.sort(byLastUseThenId);
-  expiredZero.sort(byLastUseThenId);
-  return [...orderByPace(scoredPositive), ...unscoredPositive, ...unknown, ...expiredZero];
-}
-
 /**
  * Orders the candidates for a request. Pure function: no network, no SQLite.
  *
@@ -172,18 +123,18 @@ function orderWithinPriority(candidates: readonly Candidate[]): Candidate[] {
  *     family it names (`*` for the whole account), and only that family
  *  2. accounts with a measured quota of 0 are discarded unless their resetAt <= now
  *  3. explicit priority comes before quota and pace
- *  4. known positive quota before unknown quota, unknown quota before expired zero quota
- *  5. known positive accounts with a normalizable window rank by pace score descending;
- *     the best scores within 2 pp rotate by least recent use so concurrent requests spread
- *     instead of herding. Accounts without `resetAt` (or with an unknown window) cannot
- *     be normalized and fall back to remaining quota descending, below every scored one.
+ *  4. within a priority level, ranking is the strategy's job (default `pace-deficit`:
+ *     known positive quota before unknown quota, unknown before expired zero, and the
+ *     near-best pace scores within the tolerance band rotate by least recent use)
  */
 export function order(
   snapshot: readonly AccountSnapshot[],
   runtimeModel: string,
   now: number = Date.now(),
+  strategy: LoadBalanceStrategy = DEFAULT_STRATEGY,
+  inFlightByAccount?: ReadonlyMap<string, number>,
 ): AccountSnapshot[] {
-  return orderDecision(snapshot, runtimeModel, now).accounts;
+  return orderDecision(snapshot, runtimeModel, now, strategy, inFlightByAccount).accounts;
 }
 
 export interface OrderDecision {
@@ -205,9 +156,11 @@ export function orderDecision(
   snapshot: readonly AccountSnapshot[],
   runtimeModel: string,
   now: number = Date.now(),
+  strategy: LoadBalanceStrategy = DEFAULT_STRATEGY,
+  inFlightByAccount?: ReadonlyMap<string, number>,
 ): OrderDecision {
   const bucketIdPrefix = familyBucketPrefix(runtimeModel);
-  const scoring = (account: AccountSnapshot): Candidate => ({
+  const scoring = (account: AccountSnapshot): EligibleCandidate => ({
     account,
     quota: bucketIdPrefix === null ? null : summarizePrefix(account, bucketIdPrefix),
     score: bucketIdPrefix === null ? null : paceScore(account, bucketIdPrefix, now),
@@ -224,19 +177,13 @@ export function orderDecision(
   }
 
   const candidates = (relaxed.length > 0 ? relaxed : normal).map(scoring);
-
-  // Explicit priority is the outermost key; a Map keeps each level's candidates in the
-  // order they arrived, then the levels themselves are emitted highest first.
-  const byPriority = new Map<number, Candidate[]>();
-  for (const candidate of candidates) {
-    const level = byPriority.get(candidate.account.priority);
-    if (level) level.push(candidate);
-    else byPriority.set(candidate.account.priority, [candidate]);
-  }
-
-  const accounts = [...byPriority.keys()]
-    .sort((left, right) => right - left)
-    .flatMap((priority) => orderWithinPriority(byPriority.get(priority) ?? []))
-    .map((candidate) => candidate.account);
+  // Priority tiers are part of the strategy too (the registry wraps every strategy in the
+  // tiered one), so this stays a single delegation: eligibility here, ranking there.
+  const accounts = strategy.rank(candidates, {
+    runtimeModel,
+    bucketIdPrefix,
+    now,
+    inFlightByAccount,
+  });
   return { accounts, relaxed: relaxed.length };
 }

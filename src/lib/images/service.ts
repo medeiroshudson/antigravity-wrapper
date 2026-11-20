@@ -1,4 +1,4 @@
-import { endpointCandidates, getUpstreamTimeoutMs } from "../../config/index.js";
+import { endpointCandidates, getMaxFailoverAttempts, getUpstreamTimeoutMs } from "../../config/index.js";
 import type { AccountService } from "../accounts/service.js";
 import {
   classifyUpstream,
@@ -115,11 +115,12 @@ export class ImageService {
       appealUrl?: string | null;
     }> = [];
 
-    for (const candidate of candidates) {
+    for (const candidate of candidates.slice(0, getMaxFailoverAttempts(this.deps.env))) {
       if (options?.signal?.aborted) {
         throw new ClientDisconnectedError();
       }
 
+      const releaseInFlight = this.deps.accountService.acquireInFlight?.(candidate.id);
       try {
         const fresh = await this.deps.accountService.ensureFresh(candidate);
         const projectId = fresh.projectId || "aicode-consumers";
@@ -164,6 +165,8 @@ export class ImageService {
         }
 
         throw error;
+      } finally {
+        releaseInFlight?.();
       }
     }
 

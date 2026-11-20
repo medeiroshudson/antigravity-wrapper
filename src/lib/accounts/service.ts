@@ -1,3 +1,4 @@
+import { getLoadBalanceStrategy } from "../../config/index.js";
 import { applyCatalog } from "../../config/models.js";
 import { t } from "../../i18n/index.js";
 import {
@@ -13,12 +14,17 @@ import { UpstreamError } from "../antigravity/errors.js";
 import { noopLogger, type Logger } from "../logger.js";
 import { cooldownDuration, cooldownPolicy } from "./cooldown-policy.js";
 import { familyBucketPrefix, orderDecision } from "./selector.js";
+import { createStrategy } from "./strategies/registry.js";
+import type { LoadBalanceStrategy } from "./strategies/types.js";
 import type { Account, AccountSnapshot, AccountStore } from "./store.js";
 
 const REFRESH_SKEW_MS = 5 * 60 * 1000;
 
 export class AccountService {
   private readonly logger: Logger;
+  private readonly strategy: LoadBalanceStrategy;
+  /** Accounts serving a request right now, so a strategy can prefer the idle ones. */
+  private readonly inFlight = new Map<string, number>();
 
   constructor(
     private readonly deps: {
@@ -30,6 +36,7 @@ export class AccountService {
     },
   ) {
     this.logger = deps.logger ?? noopLogger;
+    this.strategy = createStrategy(getLoadBalanceStrategy(deps.env));
   }
 
   private now(): number {
@@ -134,13 +141,36 @@ export class AccountService {
   }
 
   async orderFor(runtimeModel: string): Promise<AccountSnapshot[]> {
-    const decision = orderDecision(this.deps.store.snapshot(), runtimeModel, this.now());
+    const decision = orderDecision(
+      this.deps.store.snapshot(),
+      runtimeModel,
+      this.now(),
+      this.strategy,
+      this.inFlight,
+    );
     // Relaxing a cooldown is a decision worth seeing: it explains why a "cooling" account
     // served when the pool had nothing else.
     if (decision.relaxed > 0) {
       this.logger.debug({ runtimeModel, relaxed: decision.relaxed }, "cooldowns relaxed");
     }
     return decision.accounts;
+  }
+
+  /**
+   * Marks an account as serving until the returned release is called. Release is
+   * idempotent so a caller can put it in a `finally` without tracking whether it already
+   * ran; a counter rather than a set keeps concurrent requests on one account honest.
+   */
+  acquireInFlight(accountId: string): () => void {
+    this.inFlight.set(accountId, (this.inFlight.get(accountId) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const next = (this.inFlight.get(accountId) ?? 1) - 1;
+      if (next <= 0) this.inFlight.delete(accountId);
+      else this.inFlight.set(accountId, next);
+    };
   }
 
   /**

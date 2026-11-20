@@ -1235,13 +1235,14 @@ the transport walks it. While nothing has been written to the client, a recovera
 failure (`429`, `401` after a refresh attempt, `5xx`, timeout) simply moves to the next
 account, and the failed account's state is updated so the next request skips it. A `400`
 does **not** trigger failover — it is the caller's request that is wrong, and another
-account cannot fix it. When every candidate is exhausted the response is `503` carrying
-each account's reason, with no token in the message.
+account cannot fix it. When every candidate is exhausted the answer depends on why they
+failed: if all of them hit a quota or rate-limit wall, or the pool was empty, the status is
+`400` (a retryable `5xx` kept the client re-issuing in a loop); a mixed or server-side
+failure keeps `503`. Either way the body carries each account's reason, with no token in
+the message.
 
 A model the backend does not have is reported as `404` naming that model, not as a pool
-failure: the request itself is wrong, so it is not retried across accounts or endpoints. A
-quota wall keeps its own shape — `503` with the account list — because that one really is
-the pool's problem.
+failure: the request itself is wrong, so it is not retried across accounts or endpoints.
 
 ---
 
