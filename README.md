@@ -149,6 +149,7 @@ the subset a container deployment normally touches:
 | `PORT` / `HOST` | `3000` / `0.0.0.0` | Bind address; the published port must match `PORT` |
 | `DB_PATH` | `/app/data/antigravity.db` | Move the pool; pair it with a volume at the new path |
 | `APP_LOCALE` | `en-US` | Language of the returned messages |
+| `LOAD_BALANCE_STRATEGY` | `pace-deficit` | Account ranking strategy (`pace-deficit`, `quota-first`, `least-busy`, `round-robin`, `weighted-random`) |
 | `MAX_FAILOVER_ATTEMPTS` | `3` | Ceiling on accounts tried per request |
 | `QUOTA_REFRESH_TTL_MS` | `300000` | How often the pool's quota is re-read |
 
@@ -1116,6 +1117,7 @@ is embedded in the code.
 | `MODELS_TTL_MS` | `14400000` | Model catalog TTL |
 | `COOLDOWN_TRANSIENT_MS` | `60000` | Default cooldown for a throttle the backend did not time |
 | `COOLDOWN_QUOTA_MS` | `300000` | Default cooldown for a quota wall that named no reset time |
+| `LOAD_BALANCE_STRATEGY` | `pace-deficit` | Account ranking strategy within each priority tier |
 | `MAX_FAILOVER_ATTEMPTS` | `3` | Ceiling on accounts tried per request |
 | `BODY_LIMIT_BYTES` | `33554432` | Max request body in bytes before a `413`; raise it for very large turns |
 | `LOG_LEVEL` | `info` | Logger level. `info` shows one summary line per request; `debug` adds the per-attempt trace |
@@ -1165,28 +1167,35 @@ through `redact()`, so tokens cannot reach a log line.
 ## How load balancing works
 
 Account selection happens **before** the stream starts, as a pure function over a snapshot
-of the pool. Candidates are ordered like this:
+of the pool. Eligibility and priority are orthogonal to the ranking strategy:
 
 1. **Filter** — keep only accounts that are `enabled`, not `invalid`, and not waiting on an
    active cooldown for the requested model family (see below).
-2. **Priority overrides all of it** — an explicit `priority` sorts ahead of quota and pace:
-   the highest level is tried first, and the rules below only order accounts within one
-   level. This is how you place an account whose quota cannot be measured.
-3. **Pace within a priority** — an account with measured, positive quota and at least one
-   normalizable window ranks by its **pace score**: the **minimum deficit across the
-   requested model's group windows**, where a window's deficit is
-   `elapsed fraction − consumed fraction` and the elapsed fraction comes from `resetAt`.
-   The highest score comes first, meaning the account furthest behind its own window's
-   linear pace. Scores within `PACING_TOLERANCE` (0.02) of the best form a band ordered by
-   oldest `lastUsedAt`, then by `id`, so concurrent requests rotate instead of herding on
-   one account.
-4. **Fallback order** — below every scored account in the same priority, a positive-quota
-   account with no normalizable window (no `resetAt`, or an unknown window) falls back to
-   descending remaining quota. Unknown quota follows the measured accounts and stays
-   eligible — never zero (which would exclude the account) and never full; a free-tier
-   account whose summary the backend refuses, or one whose last refresh failed, lands here
-   and keeps serving requests. An account at zero quota is benched while its reset is in the
-   future and is only probed last, once that reset has passed.
+2. **Priority overrides all of it** — an explicit `priority` sorts ahead of any strategy
+   score: the highest level is tried first, and the configured strategy only orders accounts
+   within one level. This is how you place an account whose quota cannot be measured.
+3. **Strategy within a priority** — `LOAD_BALANCE_STRATEGY` selects how eligible accounts
+   inside each priority tier are ranked:
+   - `pace-deficit` *(default)* — accounts with measured, positive quota and at least one
+     normalizable window rank by **pace score**: the **minimum deficit across the requested
+     model's group windows**, where a window's deficit is `elapsed fraction − consumed fraction`
+     and the elapsed fraction comes from `resetAt`. The highest score comes first, meaning
+     the account furthest behind its own window's linear pace. Scores within
+     `PACING_TOLERANCE` (0.02) of the best form a band ordered by oldest `lastUsedAt`, then
+     by `id`, so concurrent requests rotate instead of herding on one account. Below every
+     scored account in the same priority, a positive-quota account with no normalizable
+     window falls back to descending remaining quota, followed by unknown quota (free-tier
+     or failed refresh) and expired zero quota.
+   - `quota-first` — ranks positive-quota accounts by descending remaining quota, followed
+     by unknown quota and expired zero quota (tie-broken by `lastUsedAt`, then `id`).
+   - `least-busy` — ranks by fewest active in-flight requests (`acquireInFlight`), breaking
+     ties by `paceScore` descending, then `lastUsedAt` and `id`.
+   - `round-robin` — deterministic per-family cursor rotation (`gemini-`, `3p-`, `*`) over
+     accounts sorted by `id`.
+   - `weighted-random` — weighted sampling without replacement using remaining quota as
+     weight (`0.1` fallback for unknown or expired-zero quota).
+4. **Failover ceiling** — `MAX_FAILOVER_ATTEMPTS` (default `3`) caps how many candidates
+   are tried per request in both chat turns and image generation.
 
 **Cooldowns are per (account, scope, kind).** A cooldown is not a flag on the account: it
 is a row saying *which* family is waiting, *why*, and *until when*.
