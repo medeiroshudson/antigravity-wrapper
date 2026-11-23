@@ -483,35 +483,35 @@ describe("refreshQuota", () => {
     expect(store.getAccount("a1")?.paidTierName).toBe("Google AI Pro");
   });
 
-  it("stores the free tier and the 403 in the same cycle", async () => {
+  it("stores the free tier without spending the summary call", async () => {
     seed();
-    const subscription403 = {
-      error: {
-        code: 403,
-        status: "PERMISSION_DENIED",
-        message: "You do not have a valid license of this product. (#3501)",
-        details: [{ reason: "SUBSCRIPTION_REQUIRED", domain: "cloudaicompanion.googleapis.com" }],
-      },
-    };
-    await new AccountService({
-      store,
-      env: ENV,
-      fetchImpl: upstream({
-        summary: subscription403,
-        summaryStatus: 403,
-        codeAssist: {
-          cloudaicompanionProject: "p",
-          paidTier: { id: "free-tier", name: "Antigravity Starter Quota" },
+    const fetchImpl = upstream({
+      summary: {
+        error: {
+          code: 403,
+          status: "PERMISSION_DENIED",
+          message: "You do not have a valid license of this product. (#3501)",
+          details: [{ reason: "SUBSCRIPTION_REQUIRED", domain: "cloudaicompanion.googleapis.com" }],
         },
-      }),
-    }).refreshQuota("a1");
+      },
+      summaryStatus: 403,
+      codeAssist: {
+        cloudaicompanionProject: "p",
+        paidTier: { id: "free-tier", name: "Antigravity Starter Quota" },
+      },
+    });
+    await new AccountService({ store, env: ENV, fetchImpl }).refreshQuota("a1");
 
     const account = store.getAccount("a1");
-    // This is the whole point of D14+D15: the operator sees which tier and why there
-    // are no groups on the same row (spec §9.1).
+    // The tier is what lets the refresh skip the summary RPC: a known free-tier account
+    // gets a 403 from it, so the call is never made and there is no error to report.
     expect(account?.paidTierId).toBe("free-tier");
-    expect(account?.quotaSummaryError).toContain("paid subscription");
+    expect(account?.quotaSummaryError).toBeNull();
     expect(store.getQuota("a1")).toEqual([]);
+    const urls = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls.map((call) =>
+      String(call[0]),
+    );
+    expect(urls.some((url) => url.includes("retrieveUserQuotaSummary"))).toBe(false);
   });
 
   it("leaves the stored tier alone when the tier read fails", async () => {
@@ -577,6 +577,64 @@ describe("refreshQuota", () => {
     expect(account?.cooldownUntil).toBeNull();
     expect(account?.enabled).toBe(true);
     expect(store.getQuota("a1")).toEqual([]);
+  });
+
+  it("falls back to the catalog's quotaInfo when the summary is denied", async () => {
+    seed();
+    const subscription403 = {
+      error: {
+        code: 403,
+        status: "PERMISSION_DENIED",
+        message: "You do not have a valid license of this product. (#3501)",
+        details: [{ reason: "SUBSCRIPTION_REQUIRED", domain: "cloudaicompanion.googleapis.com" }],
+      },
+    };
+    await new AccountService({
+      store,
+      env: ENV,
+      fetchImpl: upstream({
+        catalog: {
+          models: {
+            "gemini-3.8-flash-low": {
+              quotaInfo: { remainingFraction: 0.35, resetTime: "2026-10-19T20:39:33Z" },
+            },
+            "claude-opus-4-6-thinking": { quotaInfo: { remainingFraction: 0.7 } },
+          },
+        },
+        summary: subscription403,
+        summaryStatus: 403,
+      }),
+    }).refreshQuota("a1");
+
+    const quota = store.getQuota("a1");
+    expect(quota.map((row) => row.bucketId)).toEqual(["gemini-models", "3p-models"]);
+    expect(quota[0]?.remainingFraction).toBe(0.35);
+    expect(quota[0]?.resetAt).toBe(Date.parse("2026-10-19T20:39:33Z"));
+    expect(quota[1]?.remainingFraction).toBe(0.7);
+    // Quota was observed, just not through the summary: there is no error to report.
+    expect(store.getAccount("a1")?.quotaSummaryError).toBeNull();
+    expect(store.getAccount("a1")?.status).toBe("active");
+  });
+
+  it("keeps the paid summary over the catalog's quotaInfo", async () => {
+    seed();
+    await new AccountService({
+      store,
+      env: ENV,
+      fetchImpl: upstream({
+        catalog: {
+          models: {
+            "gemini-3.8-flash-low": { quotaInfo: { remainingFraction: 0.01 } },
+          },
+        },
+      }),
+    }).refreshQuota("a1");
+
+    expect(store.getQuota("a1").map((row) => row.bucketId)).toEqual([
+      "gemini-weekly",
+      "gemini-5h",
+    ]);
+    expect(store.getAccount("a1")?.quotaSummaryError).toBeNull();
   });
 
   it("clears the error once a later refresh succeeds", async () => {

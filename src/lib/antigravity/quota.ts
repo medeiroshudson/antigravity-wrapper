@@ -1,5 +1,6 @@
 import { endpointCandidates, getUpstreamTimeoutMs, getUserAgent, redact } from "../../config/index.js";
 import type { CatalogEntry } from "../../config/models.js";
+import { familyBucketPrefix } from "../accounts/selector.js";
 import type { QuotaBucket } from "../accounts/store.js";
 
 interface ModelsPayload {
@@ -15,6 +16,8 @@ interface ModelsPayload {
       /** The backend's own model enum (e.g. `MODEL_PLACEHOLDER_M318`). */
       model?: unknown;
       thinkingLevel?: unknown;
+      /** Free-tier quota, the only reading available when the summary RPC is denied. */
+      quotaInfo?: { remainingFraction?: unknown; resetTime?: unknown };
     }
   >;
 }
@@ -159,19 +162,65 @@ export async function retrieveUserQuotaSummary(input: {
   return { rows: [], failure };
 }
 
+/** The two quota groups the backend reports, keyed by the family bucket prefix. */
+const QUOTA_FAMILIES: Record<string, { bucketId: string; groupName: string }> = {
+  "gemini-": { bucketId: "gemini-models", groupName: "Gemini Models" },
+  "3p-": { bucketId: "3p-models", groupName: "Claude and GPT models" },
+};
+
 /**
- * Reads the model catalog: the ids the account can serve, with the backend's own metadata.
- *
- * Every optional field becomes `null` when the backend omits it, and is never guessed: the
- * registry owns the fallbacks, and inventing a number here would hide a catalog change.
- * Best-effort — a failure returns `[]`, so the caller keeps whatever catalog it had.
+ * Collapses `quotaInfo` from the catalog into one bucket per family, since the catalog
+ * repeats the family's quota on every model. It is the free-tier path: when the summary
+ * RPC answers 403 SUBSCRIPTION_REQUIRED, this is the only quota reading available.
  */
-export async function fetchAvailableModels(input: {
+function quotaRows(
+  payload: ModelsPayload,
+  now: number,
+): Array<Omit<QuotaBucket, "accountId">> {
+  const byFamily = new Map<string, Omit<QuotaBucket, "accountId">>();
+  for (const [modelId, info] of Object.entries(payload.models ?? {})) {
+    if (!info || info.isInternal) continue;
+    if (/^(chat_|tab_)/i.test(modelId)) continue;
+    const prefix = familyBucketPrefix(modelId);
+    if (prefix === null) continue;
+    const family = QUOTA_FAMILIES[prefix];
+    const fraction = info.quotaInfo?.remainingFraction;
+    if (!family || typeof fraction !== "number" || !Number.isFinite(fraction)) continue;
+
+    const remainingFraction = Math.max(0, Math.min(1, fraction));
+    const existing = byFamily.get(prefix);
+    // The lowest fraction binds the family; its own reset time is the one that matters.
+    if (existing && existing.remainingFraction <= remainingFraction) continue;
+
+    const resetTime = info.quotaInfo?.resetTime;
+    const resetAt = typeof resetTime === "string" ? Date.parse(resetTime) : Number.NaN;
+    byFamily.set(prefix, {
+      bucketId: family.bucketId,
+      window: "",
+      displayName: null,
+      groupName: family.groupName,
+      groupDescription: null,
+      bucketDescription: null,
+      remainingFraction,
+      resetAt: Number.isFinite(resetAt) ? resetAt : null,
+      fetchedAt: now,
+    });
+  }
+  return [...byFamily.values()];
+}
+
+export interface AvailableModelsResult {
+  entries: CatalogEntry[];
+  /** One bucket per family from `quotaInfo`, or `[]` when the catalog has none. */
+  quota: Array<Omit<QuotaBucket, "accountId">>;
+}
+
+async function readAvailableModels(input: {
   accessToken: string;
   projectId: string;
   env?: NodeJS.ProcessEnv;
   fetchImpl?: typeof fetch;
-}): Promise<CatalogEntry[]> {
+}): Promise<AvailableModelsResult> {
   const fetchImpl = input.fetchImpl ?? fetch;
   const headers = antigravityHeaders(input.accessToken, input.env);
 
@@ -201,11 +250,37 @@ export async function fetchAvailableModels(input: {
           thinkingLevel: typeof info.thinkingLevel === "number" ? info.thinkingLevel : null,
         });
       }
-      return entries;
+      return { entries, quota: quotaRows(data, Date.now()) };
     } catch {
       // Failure swallowed on purpose: the catalog read is best-effort and an account
       // without a fresh catalog must stay eligible (spec §8).
     }
   }
-  return [];
+  return { entries: [], quota: [] };
+}
+
+/**
+ * Reads the model catalog: the ids the account can serve, with the backend's own metadata.
+ *
+ * Every optional field becomes `null` when the backend omits it, and is never guessed: the
+ * registry owns the fallbacks, and inventing a number here would hide a catalog change.
+ * Best-effort — a failure returns `[]`, so the caller keeps whatever catalog it had.
+ */
+export async function fetchAvailableModels(input: {
+  accessToken: string;
+  projectId: string;
+  env?: NodeJS.ProcessEnv;
+  fetchImpl?: typeof fetch;
+}): Promise<CatalogEntry[]> {
+  return (await readAvailableModels(input)).entries;
+}
+
+/** The same read, plus the free-tier quota the catalog carries in `quotaInfo`. */
+export async function fetchAvailableModelsWithQuota(input: {
+  accessToken: string;
+  projectId: string;
+  env?: NodeJS.ProcessEnv;
+  fetchImpl?: typeof fetch;
+}): Promise<AvailableModelsResult> {
+  return readAvailableModels(input);
 }

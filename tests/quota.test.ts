@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { fetchAvailableModels, retrieveUserQuotaSummary } from "../src/lib/antigravity/quota.js";
+import { fetchAvailableModels, fetchAvailableModelsWithQuota, retrieveUserQuotaSummary } from "../src/lib/antigravity/quota.js";
 
 const ENV = {
   ANTIGRAVITY_CLIENT_ID: "c",
@@ -330,5 +330,108 @@ describe("fetchAvailableModels", () => {
   it("returns empty when the endpoint fails, without throwing", async () => {
     const fetchImpl = vi.fn(async () => new Response("{}", { status: 500 })) as unknown as typeof fetch;
     expect(await fetchAvailableModels({ accessToken: "t", projectId: "p", env: {}, fetchImpl })).toEqual([]);
+  });
+});
+
+describe("fetchAvailableModelsWithQuota", () => {
+  it("collapses quotaInfo into one bucket per family, lowest fraction and its reset", async () => {
+    const fetchImpl = respond({
+      models: {
+        "gemini-3.8-flash-low": {
+          quotaInfo: { remainingFraction: 0.4, resetTime: "2026-10-19T20:39:33Z" },
+        },
+        "gemini-3.8-pro-low": {
+          quotaInfo: { remainingFraction: 0.2, resetTime: "2026-10-20T10:00:00Z" },
+        },
+        "claude-opus-4-6-thinking": {
+          quotaInfo: { remainingFraction: 0.6, resetTime: "2026-10-21T08:00:00Z" },
+        },
+        "gpt-oss-120b": { quotaInfo: { remainingFraction: 0.5 } },
+        chat_1: { quotaInfo: { remainingFraction: 0 } },
+        tab_completion: { quotaInfo: { remainingFraction: 0 } },
+        "gemini-internal": { isInternal: true, quotaInfo: { remainingFraction: 0 } },
+        "text-embedding-004": { quotaInfo: { remainingFraction: 0 } },
+        "gemini-no-fraction": { quotaInfo: { remainingFraction: "0.1" } },
+        "gemini-nan": { quotaInfo: { remainingFraction: Number.NaN } },
+      },
+    });
+
+    const { entries, quota } = await fetchAvailableModelsWithQuota({
+      accessToken: "t",
+      projectId: "p",
+      env: ENV,
+      fetchImpl,
+    });
+
+    // Catalog entries keep the existing filters: internal, chat_ and tab_ are not models.
+    expect(entries.map((entry) => entry.id)).toEqual([
+      "gemini-3.8-flash-low",
+      "gemini-3.8-pro-low",
+      "claude-opus-4-6-thinking",
+      "gpt-oss-120b",
+      "text-embedding-004",
+      "gemini-no-fraction",
+      "gemini-nan",
+    ]);
+    expect(quota).toEqual([
+      {
+        bucketId: "gemini-models",
+        window: "",
+        displayName: null,
+        groupName: "Gemini Models",
+        groupDescription: null,
+        bucketDescription: null,
+        remainingFraction: 0.2,
+        resetAt: Date.parse("2026-10-20T10:00:00Z"),
+        fetchedAt: expect.any(Number),
+      },
+      {
+        bucketId: "3p-models",
+        window: "",
+        displayName: null,
+        groupName: "Claude and GPT models",
+        groupDescription: null,
+        bucketDescription: null,
+        remainingFraction: 0.5,
+        resetAt: null,
+        fetchedAt: expect.any(Number),
+      },
+    ]);
+  });
+
+  it("clamps quotaInfo fractions to 0..1 and nulls an unparseable reset", async () => {
+    const fetchImpl = respond({
+      models: {
+        "gemini-a": { quotaInfo: { remainingFraction: 1.5, resetTime: "nao e data" } },
+        "gemini-b": { quotaInfo: { remainingFraction: -0.2 } },
+        "claude-a": { quotaInfo: { remainingFraction: 2, resetTime: 1234 } },
+      },
+    });
+
+    const { quota } = await fetchAvailableModelsWithQuota({
+      accessToken: "t",
+      projectId: "p",
+      env: ENV,
+      fetchImpl,
+    });
+    const byId = new Map(quota.map((row) => [row.bucketId, row]));
+
+    expect(byId.get("gemini-models")?.remainingFraction).toBe(0);
+    expect(byId.get("gemini-models")?.resetAt).toBeNull();
+    expect(byId.get("3p-models")?.remainingFraction).toBe(1);
+    expect(byId.get("3p-models")?.resetAt).toBeNull();
+  });
+
+  it("reports no quota buckets when the catalog carries no usable quotaInfo", async () => {
+    const fetchImpl = respond({ models: { "gemini-3.8-flash-low": { displayName: "Gemini" } } });
+    const { entries, quota } = await fetchAvailableModelsWithQuota({
+      accessToken: "t",
+      projectId: "p",
+      env: ENV,
+      fetchImpl,
+    });
+
+    expect(entries).toHaveLength(1);
+    expect(quota).toEqual([]);
   });
 });

@@ -9,7 +9,12 @@ import {
   TokenResponseError,
   type OnboardingOutcome,
 } from "../antigravity/oauth.js";
-import { fetchAvailableModels, retrieveUserQuotaSummary } from "../antigravity/quota.js";
+import {
+  fetchAvailableModels,
+  fetchAvailableModelsWithQuota,
+} from "../antigravity/quota.js";
+import { createQuotaStrategy } from "../antigravity/quota-strategies/registry.js";
+import type { QuotaFetchStrategy } from "../antigravity/quota-strategies/types.js";
 import { UpstreamError } from "../antigravity/errors.js";
 import { noopLogger, type Logger } from "../logger.js";
 import { cooldownDuration, cooldownPolicy } from "./cooldown-policy.js";
@@ -23,6 +28,7 @@ const REFRESH_SKEW_MS = 5 * 60 * 1000;
 export class AccountService {
   private readonly logger: Logger;
   private readonly strategy: LoadBalanceStrategy;
+  private readonly quotaStrategy: QuotaFetchStrategy;
   /** Accounts serving a request right now, so a strategy can prefer the idle ones. */
   private readonly inFlight = new Map<string, number>();
 
@@ -33,10 +39,12 @@ export class AccountService {
       fetchImpl?: typeof fetch;
       now?: () => number;
       logger?: Logger;
+      quotaStrategy?: QuotaFetchStrategy;
     },
   ) {
     this.logger = deps.logger ?? noopLogger;
     this.strategy = createStrategy(getLoadBalanceStrategy(deps.env));
+    this.quotaStrategy = deps.quotaStrategy ?? createQuotaStrategy("auto");
   }
 
   private now(): number {
@@ -290,13 +298,12 @@ export class AccountService {
   /**
    * Reloads the account's quota and tier, and feeds the public model catalog (spec §6).
    *
-   * Three reads with different duties: `fetchAvailableModels` supplies the model ids,
-   * `retrieveUserQuotaSummary` supplies the quota the admin surface displays, and
-   * `loadCodeAssistInfo` supplies the tier that explains whether that quota is readable.
-   * All three are best-effort — a failure must never fail the refresh, must never change
-   * the account's state, and must never cancel the other reads: a `403
-   * SUBSCRIPTION_REQUIRED` is a fact about the summary, not about the account, which
-   * keeps serving requests (spec §3.5, §11).
+   * The catalog supplies the model ids and the free-tier `quotaInfo`; `loadCodeAssistInfo`
+   * supplies the tier. The quota itself comes from the configured strategy, which knows
+   * not to ask for the summary when the account is known to be free-tier. Both reads are
+   * best-effort — a failure must never fail the refresh, must never change the account's
+   * state, and must never cancel the other read: a `403 SUBSCRIPTION_REQUIRED` is a fact
+   * about the summary, not about the account, which keeps serving requests (spec §3.5, §11).
    */
   async refreshQuota(id: string): Promise<void> {
     const account = this.deps.store.getAccount(id);
@@ -308,52 +315,60 @@ export class AccountService {
     const accessToken = fresh.accessToken ?? "";
     const projectId = fresh.projectId ?? "";
 
-    const entries = await fetchAvailableModels({
-      accessToken,
-      projectId,
-      env: this.deps.env,
-      fetchImpl: this.deps.fetchImpl,
-    });
+    const [catalog, info] = await Promise.all([
+      fetchAvailableModelsWithQuota({
+        accessToken,
+        projectId,
+        env: this.deps.env,
+        fetchImpl: this.deps.fetchImpl,
+      }),
+      loadCodeAssistInfo(accessToken, {
+        env: this.deps.env,
+        fetchImpl: this.deps.fetchImpl,
+      }),
+    ]);
     // Empty = failure or empty catalog: does not overwrite what is already usable.
-    if (entries.length > 0) applyCatalog(entries);
-
-    const summary = await retrieveUserQuotaSummary({
-      accessToken,
-      env: this.deps.env,
-      fetchImpl: this.deps.fetchImpl,
-    });
-    // Always replaces: on failure the rows go away, so the response reports no groups
-    // rather than a reading the refresh could not confirm.
-    this.deps.store.replaceQuota(id, summary.rows);
-    this.deps.store.setQuotaSummaryError(
-      id,
-      summary.failure === null
-        ? null
-        : t(
-            summary.failure.reason === "subscription_required"
-              ? "quota.summaryNeedsSubscription"
-              : "quota.summaryUnavailable",
-            { detail: summary.failure.detail },
-          ),
-    );
-
-    const info = await loadCodeAssistInfo(accessToken, {
-      env: this.deps.env,
-      fetchImpl: this.deps.fetchImpl,
-    });
+    if (catalog.entries.length > 0) applyCatalog(catalog.entries);
     // Written only when the read actually happened: a failed tier read leaves the
     // previous value in place rather than blanking a display (spec §13).
     if (info) {
       this.deps.store.setPaidTier(id, { id: info.paidTierId, name: info.paidTierName });
     }
 
+    // The just-read tier decides whether the summary RPC is worth calling at all; a
+    // failed read falls back to the last tier this account was seen with.
+    const isFreeTier = info
+      ? info.paidTierId === null || info.paidTierId === "free-tier"
+      : fresh.paidTierId === "free-tier";
+    const result = await this.quotaStrategy.fetch({
+      accessToken,
+      projectId,
+      isFreeTier,
+      catalogQuota: catalog.quota,
+      env: this.deps.env,
+      fetchImpl: this.deps.fetchImpl,
+    });
+    this.deps.store.replaceQuota(id, result.rows);
+    this.deps.store.setQuotaSummaryError(
+      id,
+      result.failure === null
+        ? null
+        : t(
+            result.failure.reason === "subscription_required"
+              ? "quota.summaryNeedsSubscription"
+              : "quota.summaryUnavailable",
+            { detail: result.failure.detail },
+          ),
+    );
+
     this.logger.info(
       {
         accountId: id,
-        models: entries.length,
-        quotaRows: summary.rows.length,
+        models: catalog.entries.length,
+        quotaRows: result.rows.length,
         paidTierId: info?.paidTierId ?? null,
-        summaryError: summary.failure === null ? null : summary.failure.reason,
+        isFreeTier,
+        summaryError: result.failure === null ? null : result.failure.reason,
       },
       "quota refreshed",
     );
