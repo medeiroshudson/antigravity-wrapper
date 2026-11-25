@@ -136,14 +136,46 @@ describe("the registry", () => {
     expect(ids).toContain("claude-opus-4-6");
   });
 
-  it("ignores ids outside the families, the internals and unsupported image models", () => {
+  it("ignores ids outside the families, the internals, disabled entries and unsupported image models", () => {
     applyCatalog([
       { id: "chat_20706", displayName: "-", maxTokens: 1, maxOutputTokens: 1, supportsThinking: false, thinkingBudget: null },
       { id: "tab_flash_lite_preview", displayName: "-", maxTokens: 1, maxOutputTokens: 1, supportsThinking: false, thinkingBudget: null },
       { id: "gemini-3-pro-image", displayName: "Gemini 3 Pro Image", maxTokens: 1, maxOutputTokens: 1, supportsThinking: false, thinkingBudget: null },
+      { id: "gemini-4-argon-disabled", displayName: "Gemini 4 Argon", maxTokens: 1_048_576, maxOutputTokens: 65_536, supportsThinking: true, thinkingBudget: null },
+      { id: "gemini-4-hydrogen-disabled", displayName: "Gemini 4 Hydrogen", maxTokens: 1_048_576, maxOutputTokens: 262_144, supportsThinking: true, thinkingBudget: null },
       { id: "llama-4-scout", displayName: "Llama 4 Scout", maxTokens: 1, maxOutputTokens: 1, supportsThinking: false, thinkingBudget: null },
     ]);
     expect(getPublicModels()).toEqual([]);
+  });
+
+  it("folds -xhigh and compound -tiered-* suffixes into a single model without leaking variant ids", () => {
+    applyCatalog([
+      { id: "gemini-4-hydrogen-low", displayName: "Gemini 4 Hydrogen (Low)", maxTokens: 1_048_576, maxOutputTokens: 262_144, supportsThinking: true, thinkingBudget: null, thinkingLevel: 1 },
+      { id: "gemini-4-hydrogen-medium", displayName: "Gemini 4 Hydrogen (Medium)", maxTokens: 1_048_576, maxOutputTokens: 262_144, supportsThinking: true, thinkingBudget: null, thinkingLevel: 2 },
+      { id: "gemini-4-hydrogen-high", displayName: "Gemini 4 Hydrogen (High)", maxTokens: 1_048_576, maxOutputTokens: 262_144, supportsThinking: true, thinkingBudget: null, thinkingLevel: 3 },
+      { id: "gemini-4-hydrogen-xhigh", displayName: "Gemini 4 Hydrogen (XHigh)", maxTokens: 1_048_576, maxOutputTokens: 262_144, supportsThinking: true, thinkingBudget: null, thinkingLevel: 100 },
+      { id: "gemini-4-hydrogen-tiered-high", displayName: "Gemini 4 Hydrogen (High)", maxTokens: 1_048_576, maxOutputTokens: 262_144, supportsThinking: true, thinkingBudget: null, thinkingLevel: 3 },
+      { id: "gemini-4-hydrogen-tiered-xhigh", displayName: "Gemini 4 Hydrogen (XHigh)", maxTokens: 1_048_576, maxOutputTokens: 262_144, supportsThinking: true, thinkingBudget: null, thinkingLevel: 100 },
+    ]);
+    const models = getPublicModels();
+    expect(models.map((m) => m.id)).toEqual(["gemini-4-hydrogen"]);
+    expect(getSupportedEfforts(models[0]!)).toEqual(["low", "medium", "high", "xhigh"]);
+    expect(resolveRuntimeModel("gemini-4-hydrogen", "high")).toBe("gemini-4-hydrogen-high");
+    expect(resolveRuntimeModel("gemini-4-hydrogen", "xhigh")).toBe("gemini-4-hydrogen-xhigh");
+    expect(getThinkingConfig("gemini-4-hydrogen-xhigh", "xhigh")).toEqual({
+      includeThoughts: true,
+      thinkingLevel: "XHIGH",
+    });
+  });
+
+  it("falls back to -tiered-* variants when direct variants are absent", () => {
+    applyCatalog([
+      { id: "gemini-4-hydrogen-tiered-high", displayName: "Gemini 4 Hydrogen (High)", maxTokens: 1_048_576, maxOutputTokens: 262_144, supportsThinking: true, thinkingBudget: null },
+      { id: "gemini-4-hydrogen-tiered-xhigh", displayName: "Gemini 4 Hydrogen (XHigh)", maxTokens: 1_048_576, maxOutputTokens: 262_144, supportsThinking: true, thinkingBudget: null },
+    ]);
+    expect(getPublicModels().map((m) => m.id)).toEqual(["gemini-4-hydrogen"]);
+    expect(resolveRuntimeModel("gemini-4-hydrogen", "high")).toBe("gemini-4-hydrogen-tiered-high");
+    expect(resolveRuntimeModel("gemini-4-hydrogen", "xhigh")).toBe("gemini-4-hydrogen-tiered-xhigh");
   });
 });
 

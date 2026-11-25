@@ -45,6 +45,8 @@ export interface CatalogVariant {
   runtimeId: string;
   /** The effort suffix this runtime id carried, or null for the canonical id. */
   suffix: string | null;
+  /** Outermost effort token when a runtime id carries compound suffixes (e.g. `-tiered-high`). */
+  effortSuffix: string | null;
   degree: number;
   maxOutputTokens: number;
   supportsThinking: boolean;
@@ -66,7 +68,7 @@ export interface CatalogModel {
  * inside it. `-lite`, `-pro` and `-flash` are absent on purpose: they are identity, not
  * effort (spec D2, D3).
  */
-const EFFORT_SUFFIXES = ["extra-low", "extra-high", "low", "medium", "high", "thinking", "tiered", "agent"] as const;
+const EFFORT_SUFFIXES = ["extra-low", "extra-high", "xhigh", "low", "medium", "high", "thinking", "tiered", "agent"] as const;
 
 /**
  * How much reasoning a suffix asks for. 2 is the canonical id with no suffix. An
@@ -78,9 +80,10 @@ const DEGREE: Record<string, number> = {
   medium: 3,
   thinking: 3,
   high: 4,
-  "extra-high": 4,
   tiered: 4,
   agent: 4,
+  "extra-high": 5,
+  xhigh: 5,
 };
 const CANONICAL_DEGREE = 2;
 
@@ -91,7 +94,7 @@ const TARGET_DEGREE: Record<ReasoningEffort, number> = {
   low: 1,
   medium: 3,
   high: 4,
-  xhigh: 4,
+  xhigh: 5,
 };
 
 const FALLBACK_MAX_OUTPUT_TOKENS = 64_000;
@@ -99,17 +102,32 @@ const FALLBACK_MAX_OUTPUT_TOKENS = 64_000;
 function isCatalogModel(id: string): boolean {
   if (!/^(gemini-|claude-|gpt-)/i.test(id)) return false;
   if (/^(chat_|tab_)/i.test(id)) return false;
+  if (/-disabled$/i.test(id)) return false;
   if (/image/i.test(id) && id.toLowerCase() !== "gemini-3.1-flash-image") return false;
   return true;
 }
 
-function splitSuffix(runtimeId: string): { base: string; suffix: string | null } {
-  for (const suffix of EFFORT_SUFFIXES) {
-    if (runtimeId.endsWith(`-${suffix}`)) {
-      return { base: runtimeId.slice(0, -(suffix.length + 1)), suffix };
+function splitSuffix(runtimeId: string): { base: string; suffix: string | null; effortSuffix: string | null } {
+  let base = runtimeId;
+  const stripped: string[] = [];
+  while (true) {
+    let matched: string | null = null;
+    for (const suffix of EFFORT_SUFFIXES) {
+      if (base.endsWith(`-${suffix}`)) {
+        matched = suffix;
+        base = base.slice(0, -(suffix.length + 1));
+        stripped.unshift(suffix);
+        break;
+      }
     }
+    if (matched === null) break;
   }
-  return { base: runtimeId, suffix: null };
+  if (stripped.length === 0) return { base: runtimeId, suffix: null, effortSuffix: null };
+  return {
+    base,
+    suffix: stripped.join("-"),
+    effortSuffix: stripped[stripped.length - 1] ?? null,
+  };
 }
 
 /** The backend's label with its effort parenthesis removed, or the fallback. */
@@ -139,11 +157,12 @@ export function applyCatalog(entries: readonly CatalogEntry[]): void {
     const runtimeId = entry.id.trim();
     if (!isCatalogModel(runtimeId)) continue;
 
-    const { base, suffix } = splitSuffix(runtimeId);
+    const { base, suffix, effortSuffix } = splitSuffix(runtimeId);
     const variant: CatalogVariant = {
       runtimeId,
       suffix,
-      degree: suffix === null ? CANONICAL_DEGREE : (DEGREE[suffix] ?? CANONICAL_DEGREE),
+      effortSuffix,
+      degree: effortSuffix === null ? CANONICAL_DEGREE : (DEGREE[effortSuffix] ?? CANONICAL_DEGREE),
       maxOutputTokens: entry.maxOutputTokens ?? 0,
       supportsThinking: entry.supportsThinking,
       thinkingBudget: entry.thinkingBudget ?? 0,
@@ -228,7 +247,7 @@ export function resolveRuntimeModel(publicId: string, effort: ReasoningEffort): 
  * The thinking levels the backend accepts, in its own spelling (protojson drops the
  * `THINKING_LEVEL_` prefix, so the wire value is `HIGH`, not `THINKING_LEVEL_HIGH`).
  */
-export type ThinkingLevel = "MINIMAL" | "LOW" | "MEDIUM" | "HIGH" | "MODEL_DEFAULT";
+export type ThinkingLevel = "MINIMAL" | "LOW" | "MEDIUM" | "HIGH" | "XHIGH" | "MODEL_DEFAULT";
 
 /**
  * Variant degree -> wire level. Measured 2026-11-09: the installed client sends
@@ -242,6 +261,7 @@ const LEVEL_BY_DEGREE: Record<number, ThinkingLevel> = {
   1: "LOW",
   3: "MEDIUM",
   4: "HIGH",
+  5: "XHIGH",
 };
 
 export interface ThinkingConfig {
@@ -283,10 +303,10 @@ export function getSupportedEfforts(model: CatalogModel): string[] | undefined {
 
   const explicitEfforts = new Set<string>();
   for (const v of model.variants) {
-    if (v.suffix === "low") explicitEfforts.add("low");
-    if (v.suffix === "medium") explicitEfforts.add("medium");
-    if (v.suffix === "high") explicitEfforts.add("high");
-    if (v.suffix === "extra-high") explicitEfforts.add("xhigh");
+    if (v.effortSuffix === "low") explicitEfforts.add("low");
+    if (v.effortSuffix === "medium") explicitEfforts.add("medium");
+    if (v.effortSuffix === "high") explicitEfforts.add("high");
+    if (v.effortSuffix === "extra-high" || v.effortSuffix === "xhigh") explicitEfforts.add("xhigh");
   }
 
   if (explicitEfforts.size > 1) {

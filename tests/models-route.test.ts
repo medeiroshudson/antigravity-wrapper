@@ -164,6 +164,25 @@ describe("GET /v1/models", () => {
     expect(imgModel?.reasoning).toBeUndefined();
   });
 
+  it("omits disabled entries and folds -xhigh and -tiered-* variants on /v1/models", async () => {
+    applyCatalog([
+      { id: "gemini-4-argon-disabled", displayName: "Gemini 4 Argon", maxTokens: 1_048_576, maxOutputTokens: 65_536, supportsThinking: true, thinkingBudget: null },
+      { id: "gemini-4-hydrogen-low", displayName: "Gemini 4 Hydrogen (Low)", maxTokens: 1_048_576, maxOutputTokens: 262_144, supportsThinking: true, thinkingBudget: null },
+      { id: "gemini-4-hydrogen-medium", displayName: "Gemini 4 Hydrogen (Medium)", maxTokens: 1_048_576, maxOutputTokens: 262_144, supportsThinking: true, thinkingBudget: null },
+      { id: "gemini-4-hydrogen-high", displayName: "Gemini 4 Hydrogen (High)", maxTokens: 1_048_576, maxOutputTokens: 262_144, supportsThinking: true, thinkingBudget: null },
+      { id: "gemini-4-hydrogen-xhigh", displayName: "Gemini 4 Hydrogen (XHigh)", maxTokens: 1_048_576, maxOutputTokens: 262_144, supportsThinking: true, thinkingBudget: null },
+      { id: "gemini-4-hydrogen-tiered-high", displayName: "Gemini 4 Hydrogen (High)", maxTokens: 1_048_576, maxOutputTokens: 262_144, supportsThinking: true, thinkingBudget: null },
+      { id: "gemini-4-hydrogen-tiered-xhigh", displayName: "Gemini 4 Hydrogen (XHigh)", maxTokens: 1_048_576, maxOutputTokens: 262_144, supportsThinking: true, thinkingBudget: null },
+    ]);
+    const response = await app.inject({ method: "GET", url: "/v1/models", headers: auth });
+    expect(response.statusCode).toBe(200);
+    const data = (response.json() as { data: Array<Record<string, any>> }).data;
+    expect(data.map((m) => m.id)).toEqual(["gemini-4-hydrogen"]);
+    expect(data[0]?.reasoning).toEqual({
+      supported_efforts: ["low", "medium", "high", "xhigh"],
+    });
+  });
+
   it("returns an empty list when nothing has been discovered", async () => {
     const response = await app.inject({ method: "GET", url: "/v1/models", headers: auth });
     // No catalog means no models: advertising a static fallback is what produced the
