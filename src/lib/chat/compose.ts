@@ -97,12 +97,14 @@ function pushTurn(contents: GeminiContent[], role: "user" | "model", parts: Gemi
  * rejects multi-turn continuity.
  *
  * `strictThoughtSignatures` (native Gemini path): a tool call the wrapper cannot sign —
- * no client signature and nothing in the bank — is textualized together with its
- * result, because an unsigned functionCall part makes the upstream reject the whole
- * request with 400 "missing a thought_signature" (measured). Signature-less calls
- * happen when the client made them through the 3p bridge (which signs nothing) or
- * before a server restart emptied the bank.
+ * no client signature and nothing in the bank — uses Google's
+ * `skip_thought_signature_validator` sentinel rather than degrading into plain text.
+ * Measured 2026-11-25: textualizing calls taught the model to echo `used tool "..."`
+ * and `tool "..." returned:` as text instead of emitting `functionCall`, whereas the
+ * sentinel keeps native `functionCall`/`functionResponse` parts and answers 200.
  */
+const SKIP_THOUGHT_SIGNATURE_VALIDATOR = "skip_thought_signature_validator";
+
 export function toContents(
   messages: ChatMessage[],
   opts: { strictThoughtSignatures?: boolean } = {},
@@ -127,10 +129,6 @@ export function toContents(
   // Active tool names are tracked chronologically to prevent tool_call_id collisions
   // across turns from polluting earlier turns.
   const activeToolNames = new Map<string, string>();
-  // Calls textualized under `strictThoughtSignatures`; their responses must be
-  // textualized too, or the orphan functionResponse breaks the same rule.
-  // State is tracked sequentially and removed once the response is consumed.
-  const activeTextualized = new Set<string>();
 
   for (let msgIdx = 0; msgIdx < messages.length; msgIdx++) {
     const message = messages[msgIdx]!;
@@ -152,7 +150,6 @@ export function toContents(
         const name = call.function?.name;
         if (typeof call.id === "string" && call.id && typeof name === "string" && name) {
           activeToolNames.set(call.id, name);
-          activeTextualized.delete(call.id);
         }
       }
       for (let callIdx = 0; callIdx < toolCalls.length; callIdx++) {
@@ -171,13 +168,7 @@ export function toContents(
         // upstream rejects an unsigned history (see signatures.ts). The bank is
         // authoritative over an echo, which a client may have truncated.
         const signature = (call.id ? recallSignature(call.id) : null) ?? call.thoughtSignature ?? null;
-        if (strict && signature === null) {
-          if (typeof call.id === "string" && call.id) {
-            activeTextualized.add(call.id);
-          }
-          parts.push({ text: `used tool "${name}" with arguments ${call.function?.arguments ?? "{}"}` });
-          continue;
-        }
+        const effectiveSignature = signature ?? (strict ? SKIP_THOUGHT_SIGNATURE_VALIDATOR : null);
         const part: GeminiPart = {
           functionCall: {
             name,
@@ -185,8 +176,8 @@ export function toContents(
             ...(typeof call.id === "string" && call.id ? { id: call.id } : {}),
           },
         };
-        if (signature !== null) {
-          (part as { thoughtSignature?: string }).thoughtSignature = signature;
+        if (effectiveSignature !== null) {
+          (part as { thoughtSignature?: string }).thoughtSignature = effectiveSignature;
         }
         parts.push(part);
       }
@@ -200,13 +191,6 @@ export function toContents(
       const fallbackName = (message.name && message.name !== "tool" ? message.name : undefined) ?? "tool";
       const name = (callId ? activeToolNames.get(callId) : undefined) ?? fallbackName;
 
-      if (strict && callId && activeTextualized.has(callId)) {
-        activeTextualized.delete(callId);
-        pushTurn(contents, "user", [
-          { text: `tool "${name}" returned: ${text}` },
-        ]);
-        continue;
-      }
       const part: GeminiPart = {
         functionResponse: {
           name,

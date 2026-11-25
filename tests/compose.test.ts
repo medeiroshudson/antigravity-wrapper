@@ -80,11 +80,10 @@ describe("toContents", () => {
     expect(out.contents[0]?.parts[0]).toMatchObject({ functionResponse: { name: "solo" } });
   });
 
-  it("textualizes an assistant tool call that cannot be signed, keeping the signed ones", () => {
+  it("attaches skip_thought_signature_validator to an unsigned assistant tool call, keeping signed ones", () => {
     // A call the wrapper never signed (made before a restart, or by the 3p bridge
-    // which returns no signatures) cannot be reconstructed: sending it unsigned makes
-    // the native Gemini path reject the whole request. It becomes an equivalent text
-    // part; a call the bank does know keeps its functionCall form.
+    // which returns no signatures) must not be degraded to plain text, which teaches
+    // Gemini to echo tool calls as text; instead it receives Google's official sentinel.
     rememberSignature("call_banked", "SIG-BANKED");
     const out = toContents(
       [
@@ -104,24 +103,25 @@ describe("toContents", () => {
     const modelTurn = out.contents.find((c) => c.role === "model");
     expect(modelTurn?.parts).toEqual([
       expect.objectContaining({ functionCall: expect.objectContaining({ name: "banked_tool" }), thoughtSignature: "SIG-BANKED" }),
-      { text: expect.stringMatching(/lost_tool/) },
+      expect.objectContaining({
+        functionCall: expect.objectContaining({ name: "lost_tool", args: { path: "/b" }, id: "call_lost" }),
+        thoughtSignature: "skip_thought_signature_validator",
+      }),
     ]);
   });
 
-  it("textualizes the orphan tool result of an unsigned call", () => {
+  it("keeps native functionResponse for an unsigned call under strictThoughtSignatures", () => {
     rememberSignature("call_banked", "SIG-BANKED");
     const out = toContents(
       [
         { role: "assistant", content: null, tool_calls: [{ id: "call_lost", type: "function", function: { name: "lost_tool", arguments: "{}" } }] },
-        { role: "tool", tool_call_id: "call_lost", content: "orphan result" },
+        { role: "tool", tool_call_id: "call_lost", content: "native result" },
       ],
       { strictThoughtSignatures: true },
     );
-    // The user turn carrying the orphan response must not emit a functionResponse
-    // part: there is no functionCall for it to answer.
     const parts = out.contents.flatMap((c) => c.parts);
-    expect(parts.some((p) => "functionResponse" in p && p.functionResponse.name === "lost_tool")).toBe(false);
-    expect(parts.some((p) => "text" in p && /orphan result/.test(p.text))).toBe(true);
+    expect(parts.some((p) => "functionResponse" in p && p.functionResponse.name === "lost_tool")).toBe(true);
+    expect(parts.some((p) => "text" in p && /used tool|returned:/.test(p.text))).toBe(false);
   });
 
   it("keeps the functionCall form when signatures are not strict", () => {
@@ -243,7 +243,7 @@ describe("toContents", () => {
     expect((responseTurn2 as any)?.functionResponse?.name).toBe("toolB");
   });
 
-  it("does not textualize a signed tool call when a prior turn textualized a call with the same ID", () => {
+  it("uses skip_thought_signature_validator on unsigned turn 1 and preserves explicit SIG-VALID when tool_call_id is reused", () => {
     const messages = [
       { role: "user", content: "first prompt" },
       {
@@ -279,12 +279,18 @@ describe("toContents", () => {
     ];
 
     const out = toContents(messages, { strictThoughtSignatures: true });
-    // In turn 1 (first assistant), call_duplicate had no signature and was textualized.
-    // In turn 2 (tool response A), it was textualized into a user text turn.
-    // In turn 3 (second assistant), call_duplicate HAS a valid signature, so it should NOT be textualized.
-    // In turn 4 (tool response B), it should emit a proper functionResponse with name "toolB".
+    const modelTurn1 = out.contents[1];
+    const userTurn1 = out.contents[2];
     const modelTurn2 = out.contents[3];
     const userTurn2 = out.contents[4];
+
+    expect(modelTurn1?.parts[0]).toMatchObject({
+      functionCall: { name: "toolA", id: "call_duplicate" },
+      thoughtSignature: "skip_thought_signature_validator",
+    });
+    expect(userTurn1?.parts[0]).toMatchObject({
+      functionResponse: { name: "toolA", id: "call_duplicate" },
+    });
 
     const functionCallPart = modelTurn2?.parts.find((p) => "functionCall" in p);
     expect(functionCallPart).toMatchObject({
